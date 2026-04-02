@@ -159,7 +159,6 @@ catch {
 }
 
 $Cmd = @(
-  "scorer\scoring_server.py",
   "--model-path", $ModelPath,
   "--validation-dir", $ValidationDir,
   "--host", "0.0.0.0",
@@ -174,4 +173,5 @@ if ($ScorerAddress) {
 }
 $Cmd += $ExtraArgs
 
-& $VenvPython @Cmd
+& .\scorer\run_scorer.ps1 @Cmd
+exit $LASTEXITCODE

@@ -42,6 +42,11 @@ Windows:
 .\miner\bootstrap.ps1
 ```
 
+Managed service:
+
+- Linux/macOS: `./miner/install-service.sh`
+- Windows: `.\miner\install-service.ps1`
+
 ### Scorer
 
 Entry point: `scorer/scoring_server.py`
@@ -58,6 +63,11 @@ Windows:
 .\scorer\bootstrap.ps1
 ```
 
+Managed service:
+
+- Linux/macOS: `./scorer/install-service.sh`
+- Windows: `.\scorer\install-service.ps1`
+
 ## Documentation
 
 - `docs/MINER_GUIDE.md`
@@ -70,6 +80,7 @@ Windows:
 - This repository is not public yet.
 - Network admission for outside miners remains restricted.
 - Bootstrap is the default user entry point for both miner and scorer.
+- Managed services are available for Linux, macOS, and Windows.
 - Per-epoch local reports are written to `~/.alice/reports/`.
 - Scorer bootstrap auto-fetches the held-out validation shards into `scorer/data/validation` by default.
 - Full cross-platform validation remains a release gate before any public launch.

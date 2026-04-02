@@ -17,6 +17,11 @@ set WALLET_ADDR=
 set USER_ADDR=
 set REWARD_ADDR=
 set PS_URL=
+if defined ALICE_PS_URL (
+  set DEFAULT_PS_URL=%ALICE_PS_URL%
+) else (
+  set DEFAULT_PS_URL=https://ps.aliceprotocol.org
+)
 set EXTRA_ARGS=
 
 :scanargs
@@ -70,7 +75,7 @@ if defined REWARD_ADDR set CMDARGS=%CMDARGS% --reward-address "%REWARD_ADDR%"
 if defined HASPS (
   set CMDARGS=%CMDARGS% --ps-url "%PS_URL%"
 ) else (
-  set CMDARGS=%CMDARGS% --ps-url "https://ps.aliceprotocol.org"
+  set CMDARGS=%CMDARGS% --ps-url "%DEFAULT_PS_URL%"
 )
 set CMDARGS=%CMDARGS% %EXTRA_ARGS%
 

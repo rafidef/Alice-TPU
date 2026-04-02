@@ -20,6 +20,29 @@ Current access policy:
 .\miner\bootstrap.ps1
 ```
 
+## Long-Running Mode
+
+Foreground bootstrap is the default for first-run setup and debugging.
+
+For long-running operation with automatic restart:
+
+- Linux/macOS: `./miner/install-service.sh`
+- Windows: `.\miner\install-service.ps1`
+
+Linux systemd installation requires `sudo`.
+
+Service logs are written to `~/.alice/logs/` on Unix-like systems and `%USERPROFILE%\.alice\logs\` on Windows.
+
+Optional service overrides:
+
+- Unix: `~/.alice/miner-service.env`
+- Windows: `~\.alice\miner-service.ps1`
+
+Use the service manager commands after installation:
+
+- Linux/macOS: `./miner/start-service.sh`, `./miner/stop-service.sh`, `./miner/status-service.sh`, `./miner/uninstall-service.sh`
+- Windows: `.\miner\start-service.ps1`, `.\miner\stop-service.ps1`, `.\miner\status-service.ps1`, `.\miner\uninstall-service.ps1`
+
 ## Wallet
 
 Create a local wallet:

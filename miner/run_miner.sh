@@ -12,6 +12,7 @@ fi
 source .venv/bin/activate
 
 WALLET_PATH="${HOME}/.alice/wallet.json"
+DEFAULT_PS_URL="${ALICE_PS_URL:-https://ps.aliceprotocol.org}"
 HAS_ADDRESS=false
 HAS_REWARD_ADDRESS=false
 HAS_PS_URL=false
@@ -55,7 +56,7 @@ PY
 fi
 
 if [[ "$HAS_PS_URL" == false ]]; then
-  set -- --ps-url "https://ps.aliceprotocol.org" "$@"
+  set -- --ps-url "$DEFAULT_PS_URL" "$@"
 fi
 
 exec python miner/alice_miner.py "$@"

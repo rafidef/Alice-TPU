@@ -12,6 +12,35 @@ Current access policy:
 ./scorer/bootstrap.sh
 ```
 
+### Windows
+
+```powershell
+.\scorer\bootstrap.ps1
+```
+
+## Long-Running Mode
+
+Foreground bootstrap is the default for first-run setup and debugging.
+
+For long-running operation with automatic restart:
+
+- Linux/macOS: `./scorer/install-service.sh`
+- Windows: `.\scorer\install-service.ps1`
+
+Linux systemd installation requires `sudo`.
+
+Service logs are written to `~/.alice/logs/` on Unix-like systems and `%USERPROFILE%\.alice\logs\` on Windows.
+
+Optional service overrides:
+
+- Unix: `~/.alice/scorer-service.env`
+- Windows: `~\.alice\scorer-service.ps1`
+
+Use the service manager commands after installation:
+
+- Linux/macOS: `./scorer/start-service.sh`, `./scorer/stop-service.sh`, `./scorer/status-service.sh`, `./scorer/uninstall-service.sh`
+- Windows: `.\scorer\start-service.ps1`, `.\scorer\stop-service.ps1`, `.\scorer\status-service.ps1`, `.\scorer\uninstall-service.ps1`
+
 ## Platform Defaults
 
 - Linux x86 `>= 32GB RAM`: `float32`

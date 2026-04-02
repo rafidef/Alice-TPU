@@ -151,7 +151,7 @@ if [[ ! -f "$VALIDATION_DIR/shard_059996.pt" ]]; then
 fi
 
 CMD=(
-  python scorer/scoring_server.py
+  ./scorer/run_scorer.sh
   --model-path "$MODEL_PATH"
   --validation-dir "$VALIDATION_DIR"
   --host 0.0.0.0

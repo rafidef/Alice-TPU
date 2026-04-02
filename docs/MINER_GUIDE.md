@@ -20,6 +20,13 @@ Windows:
 .\miner\bootstrap.ps1
 ```
 
+For long-running operation with automatic restart:
+
+- Linux/macOS: `./miner/install-service.sh`
+- Windows: `.\miner\install-service.ps1`
+
+Linux systemd installation requires `sudo`.
+
 ## 2. Create or import an address
 
 Create a new local wallet:
@@ -105,3 +112,23 @@ Each report records:
 ## 8. Current release note
 
 This repository is a private release-prep baseline. Cross-platform validation is still in progress before public access opens.
+
+## 9. Managed service mode
+
+Managed mode is recommended for long-running miners.
+
+- Linux uses `systemd`
+- macOS uses `launchd`
+- Windows uses Task Scheduler
+
+Service logs are written to `~/.alice/logs/` or `%USERPROFILE%\.alice\logs\`.
+
+Optional overrides:
+
+- Unix: `~/.alice/miner-service.env`
+- Windows: `~\.alice\miner-service.ps1`
+
+Service manager commands:
+
+- Linux/macOS: `./miner/start-service.sh`, `./miner/stop-service.sh`, `./miner/status-service.sh`, `./miner/uninstall-service.sh`
+- Windows: `.\miner\start-service.ps1`, `.\miner\stop-service.ps1`, `.\miner\status-service.ps1`, `.\miner\uninstall-service.ps1`

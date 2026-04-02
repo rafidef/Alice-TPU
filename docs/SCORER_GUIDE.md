@@ -28,6 +28,19 @@ Current rollout state:
 ./scorer/bootstrap.sh
 ```
 
+Windows:
+
+```powershell
+.\scorer\bootstrap.ps1
+```
+
+For long-running operation with automatic restart:
+
+- Linux/macOS: `./scorer/install-service.sh`
+- Windows: `.\scorer\install-service.ps1`
+
+Linux systemd installation requires `sudo`.
+
 Optional manual launch:
 
 ```bash
@@ -78,3 +91,23 @@ Reward values are labeled as:
 
 - `confirmed`: reward was confirmed from a trusted balance source
 - `pending`: the epoch ended but reward confirmation is not available yet
+
+## 8. Managed service mode
+
+Managed mode is recommended for long-running scorers.
+
+- Linux uses `systemd`
+- macOS uses `launchd`
+- Windows uses Task Scheduler
+
+Service logs are written to `~/.alice/logs/` or `%USERPROFILE%\.alice\logs\`.
+
+Optional overrides:
+
+- Unix: `~/.alice/scorer-service.env`
+- Windows: `~\.alice\scorer-service.ps1`
+
+Service manager commands:
+
+- Linux/macOS: `./scorer/start-service.sh`, `./scorer/stop-service.sh`, `./scorer/status-service.sh`, `./scorer/uninstall-service.sh`
+- Windows: `.\scorer\start-service.ps1`, `.\scorer\stop-service.ps1`, `.\scorer\status-service.ps1`, `.\scorer\uninstall-service.ps1`
