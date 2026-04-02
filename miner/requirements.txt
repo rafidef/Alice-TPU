@@ -1,0 +1,8 @@
+numpy
+requests
+torch
+psutil
+substrate-interface>=1.7.0
+mnemonic
+cryptography
+
