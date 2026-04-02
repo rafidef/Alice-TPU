@@ -44,7 +44,7 @@ Miner epoch reports are written to:
 - `~/.alice/reports/miner_epoch_reports.jsonl`
 - `~/.alice/reports/epochs/miner_epoch_<epoch>.md`
 
-Each report includes work completed, loss, gradient submission counts, and reward status (`confirmed`, `pending`, or `estimate`).
+Each report includes work completed, loss, gradient submission counts, and reward status (`confirmed` or `pending`).
 
 ## Hardware
 

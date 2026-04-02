@@ -49,13 +49,13 @@ Entry point: `scorer/scoring_server.py`
 Bootstrap:
 
 ```bash
-./scorer/bootstrap.sh --validation-dir /path/to/validation
+./scorer/bootstrap.sh
 ```
 
 Windows:
 
 ```powershell
-.\scorer\bootstrap.ps1 --validation-dir C:\path\to\validation
+.\scorer\bootstrap.ps1
 ```
 
 ## Documentation
@@ -71,5 +71,5 @@ Windows:
 - Network admission for outside miners remains restricted.
 - Bootstrap is the default user entry point for both miner and scorer.
 - Per-epoch local reports are written to `~/.alice/reports/`.
-- Users who only want scorer files can use sparse checkout after cloning this same repo.
+- Scorer bootstrap auto-fetches the held-out validation shards into `scorer/data/validation` by default.
 - Full cross-platform validation remains a release gate before any public launch.

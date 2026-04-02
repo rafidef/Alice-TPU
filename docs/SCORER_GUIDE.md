@@ -20,12 +20,12 @@ Current rollout state:
 - `shared/__init__.py`
 - `core/reporting.py`
 - model checkpoint
-- validation shard set
+- validation shard set (auto-fetched by bootstrap)
 
 ## 3. Start the scorer
 
 ```bash
-./scorer/bootstrap.sh --validation-dir /path/to/validation
+./scorer/bootstrap.sh
 ```
 
 Optional manual launch:
@@ -78,4 +78,3 @@ Reward values are labeled as:
 
 - `confirmed`: reward was confirmed from a trusted balance source
 - `pending`: the epoch ended but reward confirmation is not available yet
-- `estimate`: a local estimate is shown and should not be treated as final

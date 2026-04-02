@@ -9,7 +9,7 @@ Current access policy:
 ## Quick Start
 
 ```bash
-./scorer/bootstrap.sh --validation-dir /path/to/validation
+./scorer/bootstrap.sh
 ```
 
 ## Platform Defaults
@@ -26,7 +26,7 @@ Scorer epoch reports are written to:
 - `~/.alice/reports/scorer_epoch_reports.jsonl`
 - `~/.alice/reports/epochs/scorer_epoch_<epoch>.md`
 
-Each report includes scored submissions, average score latency, model version, and reward status (`confirmed`, `pending`, or `estimate`).
+Each report includes scored submissions, average score latency, model version, and reward status (`confirmed` or `pending`).
 
 ## Chain Flow
 
@@ -38,6 +38,4 @@ Each report includes scored submissions, average score latency, model version, a
 
 Current scorer reward pool: `6%`
 
-## Scorer-only checkout
-
-By default, users clone the full `Alice-Protocol` repository. Advanced users who only want scorer files can use git sparse checkout to pull `scorer/`, `shared/`, `core/`, and `docs/` only.
+Bootstrap downloads the model and the held-out validation shards automatically into the repo-local scorer directories by default.

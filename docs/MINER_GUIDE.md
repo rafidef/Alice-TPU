@@ -100,7 +100,7 @@ Each report records:
 - batches trained
 - gradients submitted, accepted, rejected
 - average loss
-- reward status (`confirmed`, `pending`, `estimate`)
+- reward status (`confirmed`, `pending`)
 
 ## 8. Current release note
 

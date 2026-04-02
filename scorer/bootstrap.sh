@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 PS_URL="${ALICE_PS_URL:-https://ps.aliceprotocol.org}"
+SHARD_BASE_URL="${ALICE_SHARD_BASE_URL:-https://dl.aliceprotocol.org/shards}"
 MODEL_PATH=""
 VALIDATION_DIR=""
 SCORER_ADDRESS="${ALICE_SCORER_ADDRESS:-}"
@@ -28,9 +29,6 @@ while [[ $# -gt 0 ]]; do
     --scorer-address)
       SCORER_ADDRESS="${2:-}"
       shift 2
-      ;;
-    --scorer-only)
-      shift
       ;;
     *)
       EXTRA_ARGS+=("$1")
@@ -98,9 +96,57 @@ if [[ -z "$VALIDATION_DIR" ]]; then
   VALIDATION_DIR="$ROOT_DIR/scorer/data/validation"
 fi
 
-if [[ ! -d "$VALIDATION_DIR" ]]; then
-  echo "Missing validation directory: $VALIDATION_DIR"
-  echo "Provide --validation-dir /path/to/validation_shards"
+mkdir -p "$VALIDATION_DIR"
+mkdir -p "$(dirname "$VALIDATION_DIR")"
+
+echo "[bootstrap] Ensuring validation shards exist in $VALIDATION_DIR"
+if ! python - <<PY
+from pathlib import Path
+import json
+import requests
+
+base_url = "${SHARD_BASE_URL}".rstrip("/")
+validation_dir = Path("${VALIDATION_DIR}")
+validation_root = validation_dir.parent
+validation_dir.mkdir(parents=True, exist_ok=True)
+validation_root.mkdir(parents=True, exist_ok=True)
+
+shard_ids = [59996, 59997, 59998, 59999, 60000]
+index_url = f"{base_url}/shard_index.json"
+index_resp = requests.get(index_url, timeout=30)
+index_resp.raise_for_status()
+index_data = index_resp.json()
+total_shards = int(index_data.get("total_shards") or index_data.get("shard_count") or 60001)
+
+local_index = {
+    "total_shards": total_shards,
+    "shard_count": total_shards,
+    "shards": [{"filename": f"shard_{idx:06d}.pt"} for idx in range(total_shards)],
+}
+(validation_root / "shard_index.json").write_text(json.dumps(local_index), encoding="utf-8")
+
+for shard_id in shard_ids:
+    shard_name = f"shard_{shard_id:06d}.pt"
+    target = validation_dir / shard_name
+    if target.exists() and target.stat().st_size > 0:
+        continue
+    shard_url = f"{base_url}/{shard_name}"
+    with requests.get(shard_url, stream=True, timeout=300) as resp:
+        resp.raise_for_status()
+        with target.open("wb") as fh:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    fh.write(chunk)
+PY
+then
+  echo "Failed to download validation shards from ${SHARD_BASE_URL}"
+  echo "Expected ${SHARD_BASE_URL}/shard_index.json and shard_059996.pt..shard_060000.pt"
+  exit 1
+fi
+
+if [[ ! -f "$VALIDATION_DIR/shard_059996.pt" ]]; then
+  echo "Failed to download validation shards from ${SHARD_BASE_URL}"
+  echo "Expected ${SHARD_BASE_URL}/shard_index.json and shard_059996.pt..shard_060000.pt"
   exit 1
 fi
 

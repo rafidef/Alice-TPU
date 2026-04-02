@@ -92,7 +92,7 @@ Miner 会把每个 epoch 的本地汇报写到：
 - `~/.alice/reports/miner_epoch_reports.jsonl`
 - `~/.alice/reports/epochs/miner_epoch_<epoch>.md`
 
-其中包括训练量、梯度提交数、平均 loss，以及奖励状态（`confirmed` / `pending` / `estimate`）。
+其中包括训练量、梯度提交数、平均 loss，以及奖励状态（`confirmed` / `pending`）。
 
 ## 8. 当前发布说明
 
