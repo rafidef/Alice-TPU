@@ -655,7 +655,10 @@ def register_miner(
             return None
 
         reg_instance_id = str(data.get("instance_id") or data.get("miner_id") or instance_id or wallet_address)
-        print(f"✅ Registered with PS: address={wallet_address[:12]}... instance_id={reg_instance_id}")
+        print(
+            f"✅ Registered with endpoint: {_normalize_base_url(ps_url)} "
+            f"address={wallet_address[:12]}... instance_id={reg_instance_id}"
+        )
         print(
             f"   Hardware: {capabilities['device_type']}, "
             f"{capabilities['memory_gb']:.1f}GB device, "
@@ -1512,21 +1515,26 @@ def register_miner_with_retry(
         register_response = register_miner(ps_url, wallet_address, instance_id, capabilities)
         if register_response:
             return register_response
-        print(f"⚠️ PS unreachable, retrying in {retry_seconds}s... (attempt {attempt})")
+        print(
+            f"⚠️ Endpoint unreachable, retrying in {retry_seconds}s... "
+            f"(attempt {attempt}, target={_normalize_base_url(ps_url)})"
+        )
         time.sleep(retry_seconds)
 
 
-def log_runtime_route(route: Dict[str, Any]) -> None:
+def log_runtime_route(route: Dict[str, Any], control_plane_url: str) -> None:
     mode = str(route.get("mode") or "direct")
-    base_url = _normalize_base_url(route.get("base_url", ""))
+    data_plane_url = _normalize_base_url(route.get("base_url", ""))
+    control_plane_url = _normalize_base_url(control_plane_url)
     source = str(route.get("source") or "unknown")
     if mode == "aggregator":
         node_id = str(route.get("node_id") or "unknown")
-        print(f"🛰️ Assigned aggregator: {base_url} (node={node_id}, source={source})")
+        print(f"🛰️ Assigned aggregator: {data_plane_url} (node={node_id}, source={source})")
     else:
         reason = str(route.get("reason") or "no aggregator available")
-        print(f"⚠️ Direct PS mode: {base_url} (source={source}, reason={reason})")
-    print(f"🧭 Runtime endpoint: {base_url}")
+        print(f"⚠️ Direct PS mode: {data_plane_url} (source={source}, reason={reason})")
+    print(f"🧭 Control plane: {control_plane_url}")
+    print(f"🧭 Data plane: {data_plane_url}")
 
 
 def _best_layer_bucket(requested_layers: int, available_layers: List[int]) -> int:
@@ -2351,12 +2359,13 @@ def main():
 
     # Never exit on transient errors; only Ctrl+C stops the miner.
     while True:
+        control_plane_url = str(args.ps_url)
         try:
             route_info = resolve_runtime_route(args.ps_url)
-            runtime_base_url = str(route_info.get("base_url") or args.ps_url)
+            data_plane_url = str(route_info.get("base_url") or args.ps_url)
             runtime_mode = str(route_info.get("mode") or "direct")
             last_assignment_probe = time.time()
-            log_runtime_route(route_info)
+            log_runtime_route(route_info, control_plane_url)
 
             # Get hardware capabilities (auto-detect unless overridden).
             capabilities = get_hardware_info(args.device)
@@ -2383,36 +2392,13 @@ def main():
                 capabilities["reward_address"] = args.reward_address
                 print(f"💰 Reward address: {args.reward_address[:12]}...")
 
-            ps_register_response = register_miner_with_retry(
-                args.ps_url,
+            register_response = register_miner_with_retry(
+                data_plane_url,
                 wallet_address,
                 miner_instance_id,
                 capabilities,
                 retry_seconds=30,
             )
-            heartbeat_instance_id = str(
-                ps_register_response.get("instance_id")
-                or ps_register_response.get("miner_id")
-                or miner_instance_id
-                or wallet_address
-            )
-            ps_auth_token = str(ps_register_response.get("token", "")).strip()
-            if not ps_auth_token:
-                print("❌ PS registration succeeded but no auth token returned; retrying in 30s...")
-                time.sleep(30)
-                continue
-
-            register_response = ps_register_response
-            if _normalize_base_url(runtime_base_url) != _normalize_base_url(args.ps_url):
-                print("🛰️ Registering runtime session with assigned aggregator...")
-                register_response = register_miner_with_retry(
-                    runtime_base_url,
-                    wallet_address,
-                    miner_instance_id,
-                    capabilities,
-                    retry_seconds=30,
-                )
-
             miner_instance_id = str(register_response.get("instance_id") or register_response.get("miner_id") or miner_instance_id or wallet_address)
             auth_token = str(register_response.get("token", "")).strip()
             if not auth_token:
@@ -2426,7 +2412,7 @@ def main():
             reroute_required = False
             while pending_task is None:
                 task, status = request_task_with_retry(
-                    runtime_base_url,
+                    data_plane_url,
                     miner_instance_id,
                     capabilities,
                     auth_token=auth_token,
@@ -2437,7 +2423,7 @@ def main():
                     pending_task = task
                     break
                 if status == "no_task":
-                    live_epoch = _resolve_epoch_id(args.ps_url, None, auth_token=ps_auth_token)
+                    live_epoch = _resolve_epoch_id(control_plane_url, None, auth_token=None)
                     if current_epoch_stats is None and live_epoch is not None:
                         current_epoch_stats = _new_miner_epoch_stats(
                             epoch=live_epoch,
@@ -2452,13 +2438,13 @@ def main():
                         and live_epoch is not None
                         and int(live_epoch) > int(current_epoch_stats["epoch"])
                     ):
-                        _emit_miner_epoch_report(Path(args.report_dir), args.ps_url, current_epoch_stats)
+                        _emit_miner_epoch_report(Path(args.report_dir), control_plane_url, current_epoch_stats)
                         current_epoch_stats = None
-                    send_heartbeat(args.ps_url, heartbeat_instance_id, capabilities, auth_token=ps_auth_token)
+                    send_heartbeat(data_plane_url, miner_instance_id, capabilities, auth_token=auth_token)
                     if runtime_mode == "direct" and (time.time() - last_assignment_probe) >= DIRECT_ASSIGNMENT_RECHECK_S:
                         refreshed_route = resolve_runtime_route(args.ps_url, retry_attempts=1, retry_delay_s=0)
                         last_assignment_probe = time.time()
-                        if _normalize_base_url(refreshed_route.get("base_url", "")) != _normalize_base_url(runtime_base_url):
+                        if _normalize_base_url(refreshed_route.get("base_url", "")) != _normalize_base_url(data_plane_url):
                             print("🔀 Aggregator assignment recovered; re-registering on new runtime endpoint...")
                             reroute_required = True
                             break
@@ -2488,12 +2474,13 @@ def main():
                 model_path = args.model_path
                 print(f"📁 Using pre-downloaded model: {model_path}")
             else:
+                print(f"📦 Control-plane model download via {control_plane_url}")
                 model_path, changed = ensure_cached_model(
-                    ps_url=runtime_base_url,
+                    ps_url=control_plane_url,
                     ps_version=int(ps_version),
                     assigned_layers=assigned_layers,
                     model_dir=Path(args.model_dir),
-                    auth_token=auth_token,
+                    auth_token=None,
                 )
                 if changed:
                     print(f"✅ Cached model updated to v{ps_version}: {model_path}")
@@ -2752,7 +2739,7 @@ def main():
                     pending_task = None
                 else:
                     task, status = request_task_with_retry(
-                        runtime_base_url,
+                        data_plane_url,
                         miner_instance_id,
                         capabilities,
                         auth_token=auth_token,
@@ -2760,11 +2747,11 @@ def main():
                         max_attempts=5,
                     )
                     if status == "no_task":
-                        send_heartbeat(args.ps_url, heartbeat_instance_id, capabilities, auth_token=ps_auth_token)
+                        send_heartbeat(data_plane_url, miner_instance_id, capabilities, auth_token=auth_token)
                         if runtime_mode == "direct" and (time.time() - last_assignment_probe) >= DIRECT_ASSIGNMENT_RECHECK_S:
                             refreshed_route = resolve_runtime_route(args.ps_url, retry_attempts=1, retry_delay_s=0)
                             last_assignment_probe = time.time()
-                            if _normalize_base_url(refreshed_route.get("base_url", "")) != _normalize_base_url(runtime_base_url):
+                            if _normalize_base_url(refreshed_route.get("base_url", "")) != _normalize_base_url(data_plane_url):
                                 print("🔀 Aggregator assignment recovered; re-registering on new runtime endpoint...")
                                 break
                         time.sleep(10)
@@ -2775,7 +2762,7 @@ def main():
 
                 task_id = task["task_id"]
                 shard_id = task["shard_id"]
-                task_epoch = _resolve_epoch_id(args.ps_url, task, auth_token=ps_auth_token)
+                task_epoch = _resolve_epoch_id(control_plane_url, task, auth_token=None)
                 task_nonce = task.get("task_nonce")
                 if not isinstance(task_nonce, str) or not task_nonce.strip():
                     print("❌ Task missing task_nonce, requesting next task...")
@@ -2793,7 +2780,7 @@ def main():
                             model_version=int(ps_version),
                         )
                     elif int(task_epoch) != int(current_epoch_stats["epoch"]):
-                        _emit_miner_epoch_report(Path(args.report_dir), args.ps_url, current_epoch_stats)
+                        _emit_miner_epoch_report(Path(args.report_dir), control_plane_url, current_epoch_stats)
                         current_epoch_stats = _new_miner_epoch_stats(
                             epoch=task_epoch,
                             wallet_address=wallet_address,
@@ -2809,7 +2796,7 @@ def main():
                 # Download shard
                 print(f"📥 Downloading shard {shard_id}...")
                 shard_data = download_shard_streaming(
-                    runtime_base_url,
+                    data_plane_url,
                     shard_id,
                     auth_token=auth_token,
                 )
@@ -2954,7 +2941,7 @@ def main():
                 if current_epoch_stats is not None:
                     current_epoch_stats["gradients_submitted"] += 1
                 success = submit_gradient(
-                    runtime_base_url,
+                    data_plane_url,
                     task_id,
                     task_nonce,
                     compressed,
@@ -3012,7 +2999,7 @@ def main():
                                 retry_caps = dict(capabilities)
                                 retry_caps["memory_gb"] = float(new_mem_cap)
                                 register_miner_with_retry(
-                                    args.ps_url,
+                                    data_plane_url,
                                     wallet_address,
                                     miner_instance_id,
                                     retry_caps,
@@ -3037,19 +3024,19 @@ def main():
                 if runtime_mode == "direct" and (time.time() - last_assignment_probe) >= DIRECT_ASSIGNMENT_RECHECK_S:
                     refreshed_route = resolve_runtime_route(args.ps_url, retry_attempts=1, retry_delay_s=0)
                     last_assignment_probe = time.time()
-                    if _normalize_base_url(refreshed_route.get("base_url", "")) != _normalize_base_url(runtime_base_url):
+                    if _normalize_base_url(refreshed_route.get("base_url", "")) != _normalize_base_url(data_plane_url):
                         print("🔀 Aggregator assignment recovered; re-registering on new runtime endpoint...")
                         time.sleep(2)
                         break
                 time.sleep(2)
 
         except KeyboardInterrupt:
-            _emit_miner_epoch_report(Path(args.report_dir), args.ps_url, current_epoch_stats)
+            _emit_miner_epoch_report(Path(args.report_dir), control_plane_url, current_epoch_stats)
             current_epoch_stats = None
             print("\n🛑 Miner stopped by user")
             return
         except Exception as e:
-            _emit_miner_epoch_report(Path(args.report_dir), args.ps_url, current_epoch_stats)
+            _emit_miner_epoch_report(Path(args.report_dir), control_plane_url, current_epoch_stats)
             current_epoch_stats = None
             print(f"❌ Unexpected error: {e}. Restarting in 30s...")
             import traceback
