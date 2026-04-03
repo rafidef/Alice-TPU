@@ -2376,9 +2376,11 @@ def main():
     )
     parser.add_argument(
         "--lr",
+        "--grad-scale",
+        dest="lr",
         type=float,
-        default=1e-5,
-        help="Gradient scale factor for submitted updates",
+        default=1e-4,
+        help="Gradient scale factor for submitted updates (legacy alias: --lr)",
     )
     parser.add_argument("--seq-len", type=int, default=128, help="Sequence length")
     parser.add_argument("--max-batches", type=int, default=10, help="Max batches per shard")
@@ -2808,7 +2810,7 @@ def main():
             if ps_assigned_batch_cap > 0:
                 print(f"   PS batch cap: {ps_assigned_batch_cap}")
             print(f"   Precision: {precision}")
-            print(f"   Gradient scale (lr): {args.lr}")
+            print(f"   Gradient scale: {args.lr}")
             print(f"   Seq len: {runtime_seq_len}")
             if len(assigned_layers) != expected_layers:
                 print(
