@@ -639,6 +639,7 @@ class ScoringServer:
         self.busy = False
         self._busy_since: float = 0.0  # timestamp when busy was set
         self._busy_timeout: float = 300.0  # auto-reset busy after 5 min
+        self._pending_deltas: list = []  # deltas fetched while busy, applied when free
         self.scored_count = 0
         self.total_time = 0.0
         self._scored_ids = set()  # Idempotency tracking
@@ -1096,18 +1097,37 @@ class ScoringServer:
             time.sleep(300)  # 5 minutes
 
     def _check_and_apply_updates(self):
-        """Check PS model version; pull deltas or full model if behind."""
+        """Check PS model version; pull deltas or full model if behind.
+
+        When busy (scoring a gradient), we still fetch deltas into
+        ``_pending_deltas`` so the download happens in parallel with scoring.
+        The lightweight apply step runs once the worker is free.
+        """
         import requests as _requests  # stdlib-compat, no new dep
 
+        # --- watchdog: auto-reset stuck busy flag ---
         if self.busy:
             stuck_for = time.time() - self._busy_since
             if stuck_for > self._busy_timeout:
                 log.warning(f"[AUTO-UPDATE] Busy watchdog: stuck for {stuck_for:.0f}s, force-releasing")
                 self.busy = False
-            else:
-                log.info("[AUTO-UPDATE] worker busy, defer update check")
-                return
 
+        # --- apply any previously fetched deltas if now free ---
+        if not self.busy and self._pending_deltas:
+            log.info(f"[AUTO-UPDATE] Applying {len(self._pending_deltas)} pending delta(s)")
+            for from_ver, payload in self._pending_deltas:
+                if from_ver != self.model_version:
+                    log.warning(f"[AUTO-UPDATE] pending delta v{from_ver} != current v{self.model_version}, discarding")
+                    break
+                if not self._apply_delta(payload, from_ver):
+                    log.warning(f"[AUTO-UPDATE] pending delta apply failed at v{from_ver}")
+                    break
+            else:
+                log.info(f"[AUTO-UPDATE] ✅ Pending deltas applied → v{self.model_version}")
+            self._pending_deltas.clear()
+            return
+
+        # --- check PS for new version ---
         try:
             resp = _requests.get(f"{self.ps_url}/model/info", timeout=60)
             if resp.status_code != 200:
@@ -1128,22 +1148,38 @@ class ScoringServer:
         log.info(f"[AUTO-UPDATE] PS v{ps_version} > local v{self.model_version} (gap={gap})")
 
         if gap > 10:
-            # Too far behind — full download
+            if self.busy:
+                log.info(f"[AUTO-UPDATE] gap={gap} > 10, need full download but busy — defer")
+                return
             log.info(f"[AUTO-UPDATE] gap={gap} > 10, downloading full model...")
             self._download_full_model_sync(ps_version)
         else:
-            # Incremental delta updates
+            # Fetch deltas — allowed even while busy (IO only, no model mutation)
+            fetched = []
             current = self.model_version
             for v in range(current, ps_version):
-                ok = self._fetch_and_apply_delta(v)
-                if not ok:
-                    log.warning(f"[AUTO-UPDATE] delta from v{v} failed, falling back to full download")
-                    self._download_full_model_sync(ps_version)
+                delta = self._fetch_delta(v)
+                if delta is None:
+                    log.warning(f"[AUTO-UPDATE] delta fetch from v{v} failed")
+                    if not self.busy:
+                        log.info("[AUTO-UPDATE] falling back to full download")
+                        self._download_full_model_sync(ps_version)
                     return
-            log.info(f"[AUTO-UPDATE] ✅ Incremental update complete → v{self.model_version}")
+                fetched.append((v, delta))
 
-    def _fetch_and_apply_delta(self, from_version: int) -> bool:
-        """Fetch single delta from PS and apply to in-memory model."""
+            if self.busy:
+                self._pending_deltas = fetched
+                log.info(f"[AUTO-UPDATE] Fetched {len(fetched)} delta(s), stashed (worker busy)")
+            else:
+                for from_ver, payload in fetched:
+                    if not self._apply_delta(payload, from_ver):
+                        log.warning(f"[AUTO-UPDATE] delta apply v{from_ver} failed, falling back to full download")
+                        self._download_full_model_sync(ps_version)
+                        return
+                log.info(f"[AUTO-UPDATE] ✅ Incremental update complete → v{self.model_version}")
+
+    def _fetch_delta(self, from_version: int) -> dict | None:
+        """Fetch a single delta payload from PS (IO only, no model mutation)."""
         import requests as _requests
 
         try:
@@ -1169,14 +1205,19 @@ class ScoringServer:
                 )
             if resp.status_code != 200:
                 log.warning(f"[AUTO-UPDATE] delta from v{from_version}: HTTP {resp.status_code}")
-                return False
+                return None
 
-            delta_payload = resp.json()
+            return resp.json()
         except Exception as e:
             log.warning(f"[AUTO-UPDATE] delta fetch failed: {e}")
-            return False
+            return None
 
-        return self._apply_delta(delta_payload, from_version)
+    def _fetch_and_apply_delta(self, from_version: int) -> bool:
+        """Fetch single delta from PS and apply to in-memory model."""
+        delta = self._fetch_delta(from_version)
+        if delta is None:
+            return False
+        return self._apply_delta(delta, from_version)
 
     def _apply_delta(self, delta_payload: dict, from_version: int) -> bool:
         """
