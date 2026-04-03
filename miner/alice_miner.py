@@ -188,6 +188,7 @@ def get_hardware_info(device_override: Optional[str] = None) -> Dict[str, Any]:
     device_type = (device_override or detected_device).lower()
     device_name = detected_name
     memory_gb = detected_memory_gb
+    runtime_memory_cap_gb: Optional[float] = None
 
     if device_type == "cuda":
         if torch.cuda.is_available():
@@ -227,11 +228,11 @@ def get_hardware_info(device_override: Optional[str] = None) -> Dict[str, Any]:
         try:
             cap_gb = float(memory_cap_env)
             if cap_gb > 0:
-                memory_gb = min(memory_gb, cap_gb)
+                runtime_memory_cap_gb = min(memory_gb, cap_gb)
         except ValueError:
             pass
 
-    return {
+    info = {
         "device": device_type,
         "device_type": device_type,
         "device_name": device_name,
@@ -239,6 +240,9 @@ def get_hardware_info(device_override: Optional[str] = None) -> Dict[str, Any]:
         "system_memory_gb": float(system_memory_gb),
         "cpu_count": int(cpu_count),
     }
+    if runtime_memory_cap_gb is not None:
+        info["runtime_memory_cap_gb"] = float(runtime_memory_cap_gb)
+    return info
 
 
 def calculate_batch_size(
@@ -1929,9 +1933,18 @@ def submit_gradient(
     auth_token: Optional[str] = None,
 ) -> bool:
     """Submit compressed gradient to PS with retry for transient failures."""
+    submit_started_at = time.time()
+    print(f"🧪 Submit timing: serialize_start t={submit_started_at:.3f}")
     # Compute hash once to avoid repeated serialization work on retries.
     gradient_bytes = json.dumps(gradient_data, sort_keys=True).encode()
+    after_serialize = time.time()
+    print(
+        f"🧪 Submit timing: serialize_done dt={after_serialize - submit_started_at:.3f}s "
+        f"bytes={len(gradient_bytes)}"
+    )
     gradient_hash = hashlib.sha256(gradient_bytes).hexdigest()
+    after_hash = time.time()
+    print(f"🧪 Submit timing: hash_done dt={after_hash - after_serialize:.3f}s")
 
     payload = {
         "task_id": task_id,
@@ -1944,11 +1957,18 @@ def submit_gradient(
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         try:
+            before_post = time.time()
+            print(f"🧪 Submit timing: http_post_start attempt={attempt} t={before_post:.3f}")
             resp = requests.post(
                 f"{ps_url}/task/complete",
                 json=payload,
                 headers=_auth_headers(auth_token),
                 timeout=900,
+            )
+            after_post = time.time()
+            print(
+                f"🧪 Submit timing: http_post_done attempt={attempt} "
+                f"status={resp.status_code} dt={after_post - before_post:.3f}s"
             )
 
             if resp.status_code == 200:
@@ -1972,6 +1992,11 @@ def submit_gradient(
             )
 
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.RequestException) as e:
+            failure_time = time.time()
+            print(
+                f"🧪 Submit timing: http_post_error attempt={attempt} "
+                f"dt={failure_time - submit_started_at:.3f}s error={e}"
+            )
             if attempt < max_attempts:
                 print(f"⚠️ Submission failed, retrying... (attempt {attempt}/{max_attempts}) error={e}")
                 time.sleep(10)
@@ -1996,8 +2021,8 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=2,
-        help="Max batch size cap (default: 2)",
+        default=None,
+        help="Manual batch size cap override (normally assigned by PS)",
     )
     parser.add_argument(
         "--lr",
@@ -2340,10 +2365,14 @@ def main():
                 batch_size_cap = max(1, min(batch_size_cap, ps_assigned_batch_cap))
                 dynamic_batch_size = max(1, min(dynamic_batch_size, batch_size_cap))
                 print(f"📊 Batch size cap assigned by PS: {batch_size_cap}")
-            if args.batch_size > 0:
+            else:
+                batch_size_cap = max(1, min(batch_size_cap, 2))
+                dynamic_batch_size = max(1, min(dynamic_batch_size, batch_size_cap))
+                print(f"📊 Fallback batch size cap (no PS assignment): {batch_size_cap}")
+            if args.batch_size is not None and args.batch_size > 0:
                 batch_size_cap = max(1, min(batch_size_cap, args.batch_size))
                 dynamic_batch_size = max(1, min(dynamic_batch_size, batch_size_cap))
-                print(f"📊 Runtime batch cap lowered by --batch-size: {batch_size_cap}")
+                print(f"📊 Manual --batch-size override applied: {batch_size_cap}")
             if profile_batch_cap > 0:
                 batch_size_cap = max(1, min(batch_size_cap, profile_batch_cap))
                 dynamic_batch_size = max(1, min(dynamic_batch_size, batch_size_cap))
