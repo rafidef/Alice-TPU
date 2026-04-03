@@ -461,10 +461,11 @@ def get_physical_device_memory_gb(device_type: str, capabilities: Dict[str, Any]
     return float(capabilities.get("system_memory_gb", capabilities.get("memory_gb", 4.0)))
 
 
-def acquire_single_instance_lock() -> Any:
-    """Ensure only one miner instance runs per host user."""
-    PIDFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    lock_fp = PIDFILE_PATH.open("w", encoding="utf-8")
+def acquire_single_instance_lock(instance_id: str | None = None) -> Any:
+    """Ensure only one miner instance runs per host user per instance-id."""
+    pidfile = PIDFILE_PATH.parent / f"miner_{instance_id}.pid" if instance_id else PIDFILE_PATH
+    pidfile.parent.mkdir(parents=True, exist_ok=True)
+    lock_fp = pidfile.open("w", encoding="utf-8")
 
     # POSIX path
     if fcntl is not None:
@@ -2438,7 +2439,7 @@ def main():
     miner_instance_id = str(args.instance_id).strip() if args.instance_id else None
 
     # Hold process-wide non-blocking file lock to prevent duplicate miners.
-    _lock_fp = acquire_single_instance_lock()
+    _lock_fp = acquire_single_instance_lock(miner_instance_id)
 
     # Persistent runtime stats for uptime logging.
     miner_start_time = time.time()
