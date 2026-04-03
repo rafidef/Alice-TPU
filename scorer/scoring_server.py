@@ -637,6 +637,8 @@ class ScoringServer:
         self._current_model_path = self._baseline_dir / "current_full.pt"
         self._current_version_path = self._baseline_dir / "current_version.txt"
         self.busy = False
+        self._busy_since: float = 0.0  # timestamp when busy was set
+        self._busy_timeout: float = 300.0  # auto-reset busy after 5 min
         self.scored_count = 0
         self.total_time = 0.0
         self._scored_ids = set()  # Idempotency tracking
@@ -976,11 +978,17 @@ class ScoringServer:
 
         # --- Busy check (single worker, one score at a time) ---
         if self.busy:
-            return web.json_response(
-                {"error": "worker_busy", "submission_id": sid}, status=503
-            )
+            stuck_for = time.time() - self._busy_since
+            if stuck_for > self._busy_timeout:
+                log.warning(f"[SCORE] Busy watchdog: stuck for {stuck_for:.0f}s, force-releasing lock")
+                self.busy = False
+            else:
+                return web.json_response(
+                    {"error": "worker_busy", "submission_id": sid}, status=503
+                )
 
         self.busy = True
+        self._busy_since = time.time()
         t0 = time.time()
 
         try:
@@ -1092,8 +1100,13 @@ class ScoringServer:
         import requests as _requests  # stdlib-compat, no new dep
 
         if self.busy:
-            log.info("[AUTO-UPDATE] worker busy, defer update check")
-            return
+            stuck_for = time.time() - self._busy_since
+            if stuck_for > self._busy_timeout:
+                log.warning(f"[AUTO-UPDATE] Busy watchdog: stuck for {stuck_for:.0f}s, force-releasing")
+                self.busy = False
+            else:
+                log.info("[AUTO-UPDATE] worker busy, defer update check")
+                return
 
         try:
             resp = _requests.get(f"{self.ps_url}/model/info", timeout=60)
@@ -1290,6 +1303,7 @@ class ScoringServer:
             "model_dtype": self.model_dtype,
             "model_version": self.model_version,
             "busy": self.busy,
+            "busy_seconds": round(time.time() - self._busy_since) if self.busy else 0,
             "scored_count": self.scored_count,
             "avg_score_ms": round(avg_ms),
             "validation_shards": len(self.validation_shards),
@@ -1338,6 +1352,7 @@ class ScoringServer:
             return web.json_response({"error": "no_validation_shards_selected"}, status=400)
 
         self.busy = True
+        self._busy_since = time.time()
         try:
             avg_loss = await asyncio.to_thread(self._validate_blocking, selected_shards)
             return web.json_response(
@@ -1416,6 +1431,7 @@ class ScoringServer:
                 )
 
             self.busy = True
+            self._busy_since = time.time()
 
             # If download_url provided, download first
             if download_url:
