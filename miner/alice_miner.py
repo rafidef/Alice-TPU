@@ -900,14 +900,9 @@ def register_compression_hooks(
     scaler: Optional[torch.cuda.amp.GradScaler] = None,
     grad_scale: float = 1.0,
     small_tensor_threshold: int = 10000,
-    ef_mode: bool = False,
 ) -> Tuple[List[Any], Dict[str, Dict[str, Any]]]:
     """
     Register post-accumulate grad hooks that compress and release gradients per-parameter.
-
-    When *ef_mode* is True, hooks accumulate **full dense gradients on CPU**
-    instead of doing TopK.  The actual TopK + Error Feedback is deferred to
-    ``finalize_sparse_gradient_parts``.
     """
     if not _torch_version_at_least(2, 1):
         raise RuntimeError(
@@ -951,42 +946,24 @@ def register_compression_hooks(
             if grad_scale != 1.0:
                 work_grad = work_grad * float(grad_scale)
 
-            if ef_mode:
-                # EF mode: accumulate full dense gradient on CPU across batches.
-                # TopK + residual handling happens in finalize.
-                cpu_flat = work_grad.to(dtype=torch.float32).flatten().cpu()
-                bucket = compressed_grads.get(_name)
-                if bucket is None:
-                    bucket = {
-                        "shape": list(grad.shape),
-                        "numel": int(cpu_flat.numel()),
-                        "dense_accum": cpu_flat,
-                        "_ef_mode": True,
-                    }
-                    compressed_grads[_name] = bucket
-                else:
-                    bucket["dense_accum"] += cpu_flat
-                del cpu_flat
-            else:
-                # Standard mode: TopK in hooks, sparse parts accumulated.
-                cpu_grad = work_grad.to(dtype=torch.float32)
-                indices_np, values_np = topk_compress(
-                    cpu_grad,
-                    ratio=ratio,
-                    small_tensor_threshold=small_tensor_threshold,
-                )
+            cpu_grad = work_grad.to(dtype=torch.float32)  # GPU topk fix
+            indices_np, values_np = topk_compress(
+                cpu_grad,
+                ratio=ratio,
+                small_tensor_threshold=small_tensor_threshold,
+            )
 
-                bucket = compressed_grads.get(_name)
-                if bucket is None:
-                    bucket = {
-                        "shape": list(cpu_grad.shape),
-                        "numel": int(cpu_grad.numel()),
-                        "indices": [],
-                        "values": [],
-                    }
-                    compressed_grads[_name] = bucket
-                bucket["indices"].append(indices_np)
-                bucket["values"].append(values_np)
+            bucket = compressed_grads.get(_name)
+            if bucket is None:
+                bucket = {
+                    "shape": list(cpu_grad.shape),
+                    "numel": int(cpu_grad.numel()),
+                    "indices": [],
+                    "values": [],
+                }
+                compressed_grads[_name] = bucket
+            bucket["indices"].append(indices_np)
+            bucket["values"].append(values_np)
 
             _param.grad = None
             if torch.cuda.is_available():
@@ -1080,9 +1057,9 @@ def finalize_sparse_gradient_parts(
 ) -> Tuple[Dict[str, Any], int]:
     """Merge per-batch sparse parts, apply Error Feedback, and emit final binary_v2 payload.
 
-    Supports two input formats per parameter bucket:
-    - **Sparse** (standard): ``indices`` / ``values`` lists from TopK hooks.
-    - **Dense** (EF mode): ``dense_accum`` tensor accumulated across batches.
+    Hooks always produce sparse (TopK) output. When EF is enabled, finalize reconstructs
+    a dense gradient per layer, adds the persisted residual, does a final TopK, and saves
+    the new residual. Peak memory: ~1.6GB (one layer's gradient + one layer's residual).
     """
     compressed: Dict[str, Any] = {
         "dtype": "torch.float32",
@@ -1096,48 +1073,45 @@ def finalize_sparse_gradient_parts(
         numel = int(bucket["numel"])
         k_cap = max(1, int(numel * ratio))
 
-        # ---- Dense accumulation path (EF mode: hooks stored full gradient) ----
-        if bucket.get("_ef_mode"):
-            dense_grad = bucket["dense_accum"]  # already CPU fp32 flat
-            assert dense_grad.numel() == numel
+        indices_chunks = bucket.get("indices", [])
+        values_chunks = bucket.get("values", [])
+        if not indices_chunks or not values_chunks:
+            continue
 
-            # Add persisted residual from previous shard
-            if ef_manager is not None and ef_manager.enabled:
-                dense_grad = ef_manager.load_and_add(name, dense_grad)
+        all_indices = np.concatenate(indices_chunks).astype(np.int32, copy=False)
+        all_values = np.concatenate(values_chunks).astype(np.float32, copy=False)
+        if all_indices.size == 0 or all_values.size == 0:
+            continue
+
+        # Deduplicate repeated indices across microbatches by summing values.
+        order = np.argsort(all_indices, kind="mergesort")
+        sorted_indices = all_indices[order]
+        sorted_values = all_values[order]
+        unique_indices, first_positions = np.unique(sorted_indices, return_index=True)
+        summed_values = np.add.reduceat(sorted_values, first_positions).astype(np.float32, copy=False)
+
+        # ---- Error Feedback: reconstruct dense, add residual, re-TopK ----
+        if ef_manager is not None and ef_manager.enabled:
+            # Reconstruct dense gradient from sparse (one layer at a time: ~0.8GB)
+            dense_grad = torch.zeros(numel, dtype=torch.float32)
+            dense_grad[torch.from_numpy(unique_indices.astype(np.int64))] = torch.from_numpy(summed_values)
+
+            # Add persisted residual from previous shard (~0.8GB)
+            dense_grad = ef_manager.load_and_add(name, dense_grad)
 
             # TopK on full (gradient + residual)
             k_final = min(k_cap, numel)
             topk_idx = torch.topk(dense_grad.abs(), k_final, sorted=False).indices
             topk_vals = dense_grad[topk_idx]
 
-            # Save residual
-            if ef_manager is not None and ef_manager.enabled:
-                ef_manager.save_residual(name, dense_grad, topk_idx, topk_vals)
+            # Save residual = dense_grad minus what we're sending
+            ef_manager.save_residual(name, dense_grad, topk_idx, topk_vals)
 
-            del dense_grad
             final_indices = topk_idx.numpy().astype(np.int32)
             final_values = topk_vals.numpy().astype(np.float32)
-            del topk_idx, topk_vals
-
-        # ---- Sparse path (standard: hooks already did TopK) ----
+            del dense_grad, topk_idx, topk_vals
         else:
-            indices_chunks = bucket.get("indices", [])
-            values_chunks = bucket.get("values", [])
-            if not indices_chunks or not values_chunks:
-                continue
-
-            all_indices = np.concatenate(indices_chunks).astype(np.int32, copy=False)
-            all_values = np.concatenate(values_chunks).astype(np.float32, copy=False)
-            if all_indices.size == 0 or all_values.size == 0:
-                continue
-
-            # Deduplicate repeated indices across microbatches by summing values.
-            order = np.argsort(all_indices, kind="mergesort")
-            sorted_indices = all_indices[order]
-            sorted_values = all_values[order]
-            unique_indices, first_positions = np.unique(sorted_indices, return_index=True)
-            summed_values = np.add.reduceat(sorted_values, first_positions).astype(np.float32, copy=False)
-
+            # No EF: just cap to k_cap
             if unique_indices.size > k_cap:
                 selected = np.argpartition(np.abs(summed_values), -k_cap)[-k_cap:]
                 unique_indices = unique_indices[selected]
@@ -2317,7 +2291,6 @@ def train_shard(
                     scaler=scaler,
                     grad_scale=float(grad_scale),
                     small_tensor_threshold=10000,
-                    ef_mode=(ef_manager is not None and ef_manager.enabled),
                 )
                 try:
                     if (
@@ -2340,22 +2313,17 @@ def train_shard(
                 for name, bucket in compressed_grads.items():
                     if name == "__meta__":
                         continue
-                    if bucket.get("_ef_mode"):
-                        # EF mode: dense_accum is accumulated in-place by hooks
-                        # across batches; just reference the bucket directly.
-                        sparse_parts[name] = bucket
-                    else:
-                        merged = sparse_parts.get(name)
-                        if merged is None:
-                            merged = {
-                                "shape": bucket["shape"],
-                                "numel": bucket["numel"],
-                                "indices": [],
-                                "values": [],
-                            }
-                            sparse_parts[name] = merged
-                        merged["indices"].extend(bucket.get("indices", []))
-                        merged["values"].extend(bucket.get("values", []))
+                    merged = sparse_parts.get(name)
+                    if merged is None:
+                        merged = {
+                            "shape": bucket["shape"],
+                            "numel": bucket["numel"],
+                            "indices": [],
+                            "values": [],
+                        }
+                        sparse_parts[name] = merged
+                    merged["indices"].extend(bucket.get("indices", []))
+                    merged["values"].extend(bucket.get("values", []))
                 total_loss += loss.item()
                 num_batches += 1
         except torch.cuda.OutOfMemoryError:
