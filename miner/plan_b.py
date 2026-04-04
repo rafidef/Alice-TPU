@@ -598,7 +598,36 @@ def run_plan_b(args: Any) -> None:
                 metadata = trainer.compute_and_compress_delta()
                 metadata["completed_shards"] = completed_shards
                 metadata["batch_size"] = int(getattr(args, "batch_size", 0) or 2)
-                trainer.submit_delta(metadata)
+                success = trainer.submit_delta(metadata)
+                if not success:
+                    _plan_b_log("Delta upload failed, re-registering and retrying once")
+                    try:
+                        register_response = miner_lib.register_miner_with_retry(
+                            data_plane_url,
+                            wallet_address,
+                            miner_instance_id,
+                            capabilities,
+                            retry_seconds=10,
+                        )
+                        miner_instance_id = str(
+                            register_response.get("instance_id")
+                            or register_response.get("miner_id")
+                            or miner_instance_id
+                            or wallet_address
+                        )
+                        new_token = str(register_response.get("token", "")).strip()
+                        if new_token:
+                            auth_token = new_token
+                            trainer.token = new_token
+                            success = trainer.submit_delta(metadata)
+                            if success:
+                                _plan_b_log("Delta upload succeeded after re-register")
+                            else:
+                                _plan_b_log("Delta upload still failed after re-register, skipping this epoch")
+                        else:
+                            _plan_b_log("Re-register returned empty token; skipping delta retry")
+                    except Exception as exc:
+                        _plan_b_log(f"Re-register for delta retry failed: {exc}")
                 wait_for_next_epoch(trainer)
         except KeyboardInterrupt:
             if heartbeat_stop is not None:
