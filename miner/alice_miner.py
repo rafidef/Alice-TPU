@@ -780,10 +780,14 @@ class ErrorFeedbackManager:
     is accumulated and resubmitted in future shards (Deep Gradient
     Compression, Lin 2018)."""
 
+    MAX_EF_DIR_SIZE_GB = float(os.environ.get("ALICE_MAX_EF_SIZE_GB", "30"))
+
     def __init__(self, residual_dir: str = "~/.alice/residual", enabled: bool = True):
         self.residual_dir = os.path.expanduser(residual_dir)
         self.enabled = enabled
         self._current_version: Optional[int] = None
+        if self.enabled:
+            self._check_residual_dir_size()
 
     # -- version management --------------------------------------------------
 
@@ -806,6 +810,24 @@ class ErrorFeedbackManager:
         safe_name = layer_name.replace(".", "_").replace("/", "_")
         return os.path.join(self._version_dir(), f"{safe_name}.pt")
 
+    def _check_residual_dir_size(self):
+        """Startup check: clear all residuals if total size exceeds limit."""
+        if not os.path.exists(self.residual_dir):
+            return
+        total_bytes = 0
+        for root, _dirs, files in os.walk(self.residual_dir):
+            for f in files:
+                if f.endswith(".pt"):
+                    try:
+                        total_bytes += os.path.getsize(os.path.join(root, f))
+                    except OSError:
+                        pass
+        total_gb = total_bytes / 1e9
+        if total_gb > self.MAX_EF_DIR_SIZE_GB:
+            print(f"[EF] Residual dir {total_gb:.1f}GB exceeds {self.MAX_EF_DIR_SIZE_GB}GB limit, clearing")
+            shutil.rmtree(self.residual_dir, ignore_errors=True)
+            os.makedirs(self.residual_dir, exist_ok=True)
+
     # -- core operations -----------------------------------------------------
 
     def load_and_add(self, layer_name: str, gradient: torch.Tensor) -> torch.Tensor:
@@ -818,10 +840,18 @@ class ErrorFeedbackManager:
             return gradient
         try:
             residual = torch.load(path, map_location="cpu", weights_only=True)
+            if residual.shape != gradient.shape:
+                print(f"[EF] Shape mismatch for {layer_name}: {residual.shape} vs {gradient.shape}, reinitializing")
+                del residual
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                return gradient
             gradient = gradient + residual
             del residual
         except Exception as e:
-            print(f"[EF] Failed to load residual for {layer_name}: {e}")
+            print(f"[EF] Corrupted residual for {layer_name}: {e}, reinitializing")
             try:
                 os.remove(path)
             except OSError:
@@ -833,15 +863,20 @@ class ErrorFeedbackManager:
         """Compute residual = full_gradient − reconstruct(topk) and persist to disk."""
         if not self.enabled or self._current_version is None:
             return
+        path = self._residual_path(layer_name)
         try:
             topk_dense = torch.zeros_like(full_gradient)
             topk_dense[topk_indices] = topk_values.to(topk_dense.dtype)
             residual = full_gradient - topk_dense
             del topk_dense
-            torch.save(residual, self._residual_path(layer_name))
+            torch.save(residual, path)
             del residual
         except Exception as e:
             print(f"[EF] Failed to save residual for {layer_name}: {e}")
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
     # -- stats ---------------------------------------------------------------
 
