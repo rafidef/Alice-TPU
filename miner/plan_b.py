@@ -63,12 +63,14 @@ class LocalTrainer:
         miner_address: str,
         token: str,
         args: Any,
+        miner_instance_id: Optional[str] = None,
     ) -> None:
         self.model = model
         self.device = device
         self.ps_url = _normalize_url(ps_url)
         self.aggregator_url = _normalize_url(aggregator_url)
         self.miner_address = str(miner_address)
+        self.miner_instance_id = str(miner_instance_id or miner_address)
         self.token = str(token or "")
         self.args = args
         self.snapshot_dir = SNAPSHOT_DIR
@@ -493,9 +495,10 @@ def run_plan_b(args: Any) -> None:
                 device=device,
                 ps_url=control_plane_url,
                 aggregator_url=data_plane_url,
-                miner_address=miner_instance_id,
+                miner_address=wallet_address,
                 token=auth_token,
                 args=args,
+                miner_instance_id=miner_instance_id,
             )
             trainer.apply_epoch_updates()
             heartbeat_stop, heartbeat_re_register, _thread = miner_lib.start_heartbeat_loop(
@@ -540,7 +543,7 @@ def run_plan_b(args: Any) -> None:
                         _plan_b_log(f"Shard download failed for {shard_id}")
                         continue
                     avg_loss = trainer.train_shard_local(shard_data)
-                    notify_shard_complete(data_plane_url, miner_instance_id, auth_token, task, avg_loss)
+                    notify_shard_complete(data_plane_url, wallet_address, auth_token, task, avg_loss)
                     completed_shards += 1
 
                 if heartbeat_re_register is not None and heartbeat_re_register.is_set():
