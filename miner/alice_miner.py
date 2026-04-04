@@ -1412,7 +1412,7 @@ def ensure_cached_model(
             print(f"[Model] 本地模型 v{local_version} 已存在且校验通过，跳过下载")
             return local_path, False
 
-        # delta path (best-effort)
+        # delta path (best-effort); on failure keep mining with local model
         if local_version is not None and local_path is not None and ps_version > local_version:
             gap = ps_version - local_version
             if gap <= MAX_DELTA_HOPS:
@@ -1432,11 +1432,13 @@ def ensure_cached_model(
                     write_local_version(model_dir, ps_version)
                     if local_path and local_path.exists():
                         return local_path, False
-                print("[Model] delta 不可用或失败，回退完整下载")
+                print(f"[Model] delta 不可用或失败，继续使用本地 v{local_version}（版本容忍度允许）")
             else:
-                print(f"[Model] 版本差距 {gap} > {MAX_DELTA_HOPS}，直接完整下载")
+                print(f"[Model] 版本差距 {gap} > {MAX_DELTA_HOPS}，继续使用本地 v{local_version}")
+            # Keep mining with stale model — version tolerance on PS accepts it
+            return local_path, False
 
-        # full download
+        # full download (only when no local model exists at all)
         target = _model_file_path(model_dir, ps_version)
         ok, total_bytes = download_partial_model_with_retry(
             ps_url,
