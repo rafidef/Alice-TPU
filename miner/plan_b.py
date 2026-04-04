@@ -302,6 +302,19 @@ class LocalTrainer:
     def _full_model_path(self, version: int) -> Path:
         return PLAN_B_MODEL_DIR / f"full_model_v{version}.pt"
 
+    def _find_best_local_model(self, target_version: Optional[int]) -> Optional[int]:
+        best_version: Optional[int] = None
+        for path in PLAN_B_MODEL_DIR.glob("full_model_v*.pt"):
+            try:
+                version = int(path.stem.split("_v", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            if target_version is not None and version > target_version:
+                continue
+            if best_version is None or version > best_version:
+                best_version = version
+        return best_version
+
     def _load_model_from_state_dict(self, state_dict: Dict[str, torch.Tensor]) -> torch.nn.Module:
         alice_config = miner_lib.AliceConfig()
         embed_weight = state_dict.get("model.embed_tokens.weight")
@@ -359,8 +372,14 @@ class LocalTrainer:
     def apply_epoch_updates(self) -> None:
         target_version = self._current_ps_model_version()
         if self.model is None or self.current_model_version is None:
-            self.download_full_model(target_version)
-            return
+            local_version = self._find_best_local_model(target_version)
+            if local_version is None:
+                self.download_full_model(target_version)
+                return
+            _plan_b_log(
+                f"Found local model v{local_version}, loading instead of downloading v{target_version}"
+            )
+            self.download_full_model(version=local_version)
         if target_version is None or target_version <= self.current_model_version:
             return
         gap = target_version - self.current_model_version
