@@ -2639,7 +2639,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-batches", type=int, default=10, help="Max batches per shard")
     parser.add_argument("--model-path", type=Path, default=None, help="Pre-downloaded model path (skip download)")
     parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR, help="Model cache directory (default: ~/.alice/models)")
-    parser.add_argument("--mode", choices=["plan_a", "plan_b"], default="plan_a", help="Training mode")
+    parser.add_argument("--mode", choices=["plan_a", "plan_b"], default="plan_b", help="Training mode")
     parser.add_argument("--local-lr", type=float, default=0.001, help="Local SGD learning rate for Plan B")
     parser.add_argument(
         "--delta-compression-ratio",
@@ -3550,6 +3550,10 @@ def run_plan_a(args: argparse.Namespace) -> None:
 def main():
     parser = build_arg_parser()
     args = parser.parse_args()
+    if args.mode == "plan_a":
+        print("⚠️  WARNING: Plan A is deprecated.")
+        print("⚠️  Plan B is now the default mode.")
+        print("⚠️  Plan A remains available as a legacy path.")
     if args.mode == "plan_b":
         from plan_b import run_plan_b
 

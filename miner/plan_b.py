@@ -24,6 +24,8 @@ STATUS_CACHE_TTL_S = 30
 TRAINING_WINDOW_S = 3000
 SUBMIT_WINDOW_S = 600
 MAX_INCREMENTAL_CATCHUP_GAP = 5
+BATCH_RESTORE_SUCCESS_SHARDS = 3
+MAX_OOM_RETRIES_AT_BATCH1 = 3
 
 
 def _plan_b_log(message: str) -> None:
@@ -92,6 +94,10 @@ class LocalTrainer:
         self.delta_outbox_dir.mkdir(parents=True, exist_ok=True)
         PLAN_B_MODEL_DIR.mkdir(parents=True, exist_ok=True)
         self.current_model_version: Optional[int] = None
+        self.assigned_batch_size: Optional[int] = None
+        self.effective_batch_size: int = 2
+        self.stable_shards_at_current_batch: int = 0
+        self._last_batch_log: Optional[Tuple[int, int, str]] = None
         self._status_cache: Optional[Dict[str, Any]] = None
         self._status_cache_ts: float = 0.0
         self.epoch_start_time: float = time.time()
@@ -104,8 +110,66 @@ class LocalTrainer:
         PLAN_B_MODEL_DIR.mkdir(parents=True, exist_ok=True)
         _version_marker_path().write_text(str(int(version)))
 
+    def _read_local_version_marker(self) -> Optional[int]:
+        path = _version_marker_path()
+        if not path.exists():
+            return None
+        try:
+            value = path.read_text().strip()
+            return int(value) if value else None
+        except Exception:
+            return None
+
     def _headers(self) -> Dict[str, str]:
         return miner_lib._auth_headers(self.token)
+
+    def _target_batch_size(self) -> int:
+        ps_cap = max(1, int(self.assigned_batch_size or 0) or 2)
+        user_override = int(getattr(self.args, "batch_size", 0) or 0)
+        if user_override > 0:
+            return max(1, min(user_override, ps_cap))
+        return ps_cap
+
+    def _log_batch_decision(self, source: str) -> None:
+        assigned = max(1, int(self.assigned_batch_size or 0) or 2)
+        effective = max(1, int(self.effective_batch_size or 0) or 1)
+        state = (assigned, effective, str(source))
+        if state == self._last_batch_log:
+            return
+        self._last_batch_log = state
+        _plan_b_log(
+            f"Batch size selected: assigned_batch_size={assigned}, "
+            f"effective_batch_size={effective}, source={source}"
+        )
+
+    def update_task_batch_size(self, task: Dict[str, Any]) -> int:
+        previous_assigned = self.assigned_batch_size
+        raw_assigned = int((task or {}).get("assigned_batch_size", 0) or 0)
+        self.assigned_batch_size = raw_assigned if raw_assigned > 0 else 2
+        target_batch = self._target_batch_size()
+        user_override = int(getattr(self.args, "batch_size", 0) or 0)
+        source = "ps_assignment"
+        if user_override > 0:
+            source = "manual_override_capped"
+        if previous_assigned is None or previous_assigned != self.assigned_batch_size:
+            self.effective_batch_size = target_batch
+            self.stable_shards_at_current_batch = 0
+        elif self.effective_batch_size <= 0 or self.effective_batch_size > target_batch:
+            self.effective_batch_size = target_batch
+            self.stable_shards_at_current_batch = 0
+        self._log_batch_decision(source)
+        return target_batch
+
+    def _clear_device_cache(self) -> None:
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+        elif self.device.type == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+            with contextlib.suppress(Exception):
+                torch.mps.empty_cache()
+
+    def _is_oom_error(self, exc: BaseException) -> bool:
+        message = str(exc).lower()
+        return isinstance(exc, torch.cuda.OutOfMemoryError) or "out of memory" in message
 
     def save_global_snapshot(self) -> None:
         if self.model is None:
@@ -122,84 +186,135 @@ class LocalTrainer:
         path = self.snapshot_dir / f"{_safe_layer_name(name)}.pt"
         return torch.load(path, map_location="cpu", weights_only=True).float()
 
-    def train_shard_local(self, shard_data: Any) -> float:
+    def train_shard_local(self, shard_data: Any) -> Tuple[Optional[float], int, bool]:
         if self.model is None:
             raise RuntimeError("Plan B model is not initialized")
-        self.model.train()
-        self.model.zero_grad(set_to_none=True)
-        local_lr = float(self.args.local_lr)
-        hooks: List[Any] = []
-        for param in self.model.parameters():
-            if not param.requires_grad:
-                continue
-            if not hasattr(param, "register_post_accumulate_grad_hook"):
-                raise RuntimeError(
-                    "register_post_accumulate_grad_hook is unavailable in this PyTorch build"
-                )
-
-            def _hook(
-                _: torch.Tensor,
-                *,
-                _param: torch.Tensor = param,
-                _lr: float = local_lr,
-            ) -> None:
-                grad = _param.grad
-                if grad is None:
-                    return
-                _param.data = (_param.data.float() - _lr * grad.float()).to(_param.dtype)
-                _param.grad = None
-
-            hooks.append(param.register_post_accumulate_grad_hook(_hook))
         tokens = _extract_tokens(shard_data)
         seq_len = int(getattr(self.args, "seq_len", 128) or 128)
         max_batches = int(getattr(self.args, "max_batches", 10) or 10)
-        batch_size = max(1, int(getattr(self.args, "batch_size", 0) or 2))
-        start_idx = 0
-        total_loss = 0.0
-        num_batches = 0
+        current_batch_size = max(1, int(self.effective_batch_size or self._target_batch_size() or 2))
+        oom_retries_at_batch1 = 0
 
-        try:
-            while start_idx < max(1, tokens.numel() - seq_len - 1) and num_batches < max_batches:
-                batch_inputs: List[torch.Tensor] = []
-                batch_labels: List[torch.Tensor] = []
-                for batch_offset in range(batch_size):
-                    offset = start_idx + batch_offset * seq_len
-                    if offset + seq_len + 1 > tokens.numel():
-                        break
-                    chunk = tokens[offset : offset + seq_len + 1]
-                    batch_inputs.append(chunk[:-1])
-                    batch_labels.append(chunk[1:])
-                if not batch_inputs:
-                    break
-
-                input_ids = torch.stack(batch_inputs).to(self.device)
-                labels = torch.stack(batch_labels).to(self.device)
-                use_amp = self.device.type in ("cuda", "mps") and str(getattr(self.args, "precision", "auto")) != "fp32"
-                autocast_dtype = torch.float16 if self.device.type in ("cuda", "mps") else torch.float32
-                with (torch.autocast(device_type=self.device.type, dtype=autocast_dtype) if use_amp else contextlib.nullcontext()):
-                    _, loss = self.model(input_ids, labels)
-
-                if loss is None or not torch.isfinite(loss):
-                    _plan_b_log("Skipping invalid local loss batch")
-                    self.model.zero_grad(set_to_none=True)
-                    start_idx += len(batch_inputs) * seq_len
-                    del input_ids, labels, loss
-                    continue
-
-                loss.backward()
-
-                total_loss += float(loss.item())
-                num_batches += 1
-                start_idx += len(batch_inputs) * seq_len
-
-                del input_ids, labels, loss
-        finally:
-            for hook in hooks:
-                hook.remove()
+        while True:
+            self.model.train()
             self.model.zero_grad(set_to_none=True)
-        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
-        _plan_b_log(f"Local shard training complete: batches={num_batches}, avg_loss={avg_loss:.4f}")
-        return avg_loss
+            local_lr = float(self.args.local_lr)
+            hooks: List[Any] = []
+            start_idx = 0
+            total_loss = 0.0
+            num_batches = 0
+            should_retry = False
+
+            for param in self.model.parameters():
+                if not param.requires_grad:
+                    continue
+                if not hasattr(param, "register_post_accumulate_grad_hook"):
+                    raise RuntimeError(
+                        "register_post_accumulate_grad_hook is unavailable in this PyTorch build"
+                    )
+
+                def _hook(
+                    _: torch.Tensor,
+                    *,
+                    _param: torch.Tensor = param,
+                    _lr: float = local_lr,
+                ) -> None:
+                    grad = _param.grad
+                    if grad is None:
+                        return
+                    _param.data = (_param.data.float() - _lr * grad.float()).to(_param.dtype)
+                    _param.grad = None
+
+                hooks.append(param.register_post_accumulate_grad_hook(_hook))
+
+            try:
+                while start_idx < max(1, tokens.numel() - seq_len - 1) and num_batches < max_batches:
+                    batch_inputs: List[torch.Tensor] = []
+                    batch_labels: List[torch.Tensor] = []
+                    for batch_offset in range(current_batch_size):
+                        offset = start_idx + batch_offset * seq_len
+                        if offset + seq_len + 1 > tokens.numel():
+                            break
+                        chunk = tokens[offset : offset + seq_len + 1]
+                        batch_inputs.append(chunk[:-1])
+                        batch_labels.append(chunk[1:])
+                    if not batch_inputs:
+                        break
+
+                    try:
+                        input_ids = torch.stack(batch_inputs).to(self.device)
+                        labels = torch.stack(batch_labels).to(self.device)
+                        use_amp = self.device.type in ("cuda", "mps") and str(getattr(self.args, "precision", "auto")) != "fp32"
+                        autocast_dtype = torch.float16 if self.device.type in ("cuda", "mps") else torch.float32
+                        with (torch.autocast(device_type=self.device.type, dtype=autocast_dtype) if use_amp else contextlib.nullcontext()):
+                            _, loss = self.model(input_ids, labels)
+
+                        if loss is None or not torch.isfinite(loss):
+                            _plan_b_log("Skipping invalid local loss batch")
+                            self.model.zero_grad(set_to_none=True)
+                            start_idx += len(batch_inputs) * seq_len
+                            del input_ids, labels, loss
+                            continue
+
+                        loss.backward()
+                        total_loss += float(loss.item())
+                        num_batches += 1
+                        start_idx += len(batch_inputs) * seq_len
+                        del input_ids, labels, loss
+                    except Exception as exc:
+                        if not self._is_oom_error(exc):
+                            raise
+                        self._clear_device_cache()
+                        old_batch_size = current_batch_size
+                        new_batch_size = max(1, current_batch_size // 2)
+                        self.stable_shards_at_current_batch = 0
+                        if new_batch_size == current_batch_size:
+                            oom_retries_at_batch1 += 1
+                            _plan_b_log(
+                                f"OOM at batch_size={current_batch_size}; retry {oom_retries_at_batch1}/{MAX_OOM_RETRIES_AT_BATCH1}"
+                            )
+                            if oom_retries_at_batch1 >= MAX_OOM_RETRIES_AT_BATCH1:
+                                _plan_b_log("Repeated OOM at batch_size=1, skipping shard")
+                                self.effective_batch_size = 1
+                                return None, 1, False
+                        else:
+                            current_batch_size = new_batch_size
+                            oom_retries_at_batch1 = 0
+                            self.effective_batch_size = new_batch_size
+                            _plan_b_log(f"OOM detected, reducing batch size: {old_batch_size} -> {new_batch_size}")
+                        should_retry = True
+                        break
+            finally:
+                for hook in hooks:
+                    hook.remove()
+                self.model.zero_grad(set_to_none=True)
+
+            if should_retry:
+                continue
+
+            if num_batches <= 0:
+                _plan_b_log("No valid local batches completed, skipping shard")
+                self.stable_shards_at_current_batch = 0
+                self.effective_batch_size = current_batch_size
+                return None, current_batch_size, False
+
+            self.effective_batch_size = current_batch_size
+            self.stable_shards_at_current_batch += 1
+            target_batch_size = self._target_batch_size()
+            if self.stable_shards_at_current_batch >= BATCH_RESTORE_SUCCESS_SHARDS and current_batch_size < target_batch_size:
+                restored_batch_size = min(current_batch_size * 2, target_batch_size)
+                if restored_batch_size != current_batch_size:
+                    _plan_b_log(
+                        f"Batch size restored after stable training: {current_batch_size} -> {restored_batch_size}"
+                    )
+                    self.effective_batch_size = restored_batch_size
+                    self.stable_shards_at_current_batch = 0
+
+            avg_loss = total_loss / num_batches
+            _plan_b_log(
+                f"Local shard training complete: batches={num_batches}, avg_loss={avg_loss:.4f}, batch_size={current_batch_size}"
+            )
+            return avg_loss, current_batch_size, True
 
     def compute_and_compress_delta(self) -> Dict[str, Any]:
         if self.model is None:
@@ -282,6 +397,7 @@ class LocalTrainer:
             "miner_id": self.miner_address,
             "completed_shards": int(metadata.get("completed_shards", 0) or 0),
             "batch_size": int(metadata.get("batch_size", 0) or 0),
+            "completed_effective_tokens": int(metadata.get("completed_effective_tokens", 0) or 0),
             "delta_norm": float(metadata.get("delta_norm", 0.0) or 0.0),
             "model_version": int(metadata.get("model_version", self.current_model_version or 0) or 0),
         }
@@ -468,6 +584,11 @@ class LocalTrainer:
                 time.sleep(DOWNLOAD_QUEUE_RETRY_S)
 
     def _find_best_local_model(self, target_version: Optional[int]) -> Optional[int]:
+        marker_version = self._read_local_version_marker()
+        if marker_version is not None:
+            marker_path = self._full_model_path(marker_version)
+            if marker_path.exists() and (target_version is None or marker_version <= target_version):
+                return marker_version
         best_version: Optional[int] = None
         for path in PLAN_B_MODEL_DIR.glob("full_model_v*.pt"):
             try:
@@ -753,6 +874,7 @@ def run_plan_b(args: Any) -> None:
                 trainer.apply_epoch_updates()
                 trainer.save_global_snapshot()
                 completed_shards = 0
+                completed_effective_tokens = 0
 
                 while not trainer.epoch_ending():
                     if heartbeat_re_register is not None and heartbeat_re_register.is_set():
@@ -773,13 +895,17 @@ def run_plan_b(args: Any) -> None:
                         _plan_b_log("Task request requires re-registration")
                         break
 
+                    trainer.update_task_batch_size(task)
                     shard_id = task.get("shard_id")
                     _plan_b_log(f"Downloading shard {shard_id}")
                     shard_data = miner_lib.download_shard_streaming(data_plane_url, int(shard_id), auth_token=auth_token)
                     if shard_data is None:
                         _plan_b_log(f"Shard download failed for {shard_id}")
                         continue
-                    avg_loss = trainer.train_shard_local(shard_data)
+                    avg_loss, shard_batch_size, completed = trainer.train_shard_local(shard_data)
+                    if not completed or avg_loss is None:
+                        _plan_b_log(f"Skipping shard {shard_id} after failed local training")
+                        continue
                     notify_shard_complete(data_plane_url, wallet_address, auth_token, task, avg_loss)
                     confirm_shard_complete(
                         trainer.ps_url,
@@ -789,13 +915,25 @@ def run_plan_b(args: Any) -> None:
                         task.get("epoch"),
                     )
                     completed_shards += 1
+                    completed_effective_tokens += int(shard_batch_size)
 
                 if heartbeat_re_register is not None and heartbeat_re_register.is_set():
                     break
 
                 metadata = trainer.compute_and_compress_delta()
                 metadata["completed_shards"] = completed_shards
-                metadata["batch_size"] = int(getattr(args, "batch_size", 0) or 2)
+                metadata["batch_size"] = int(
+                    (completed_effective_tokens // completed_shards)
+                    if completed_shards > 0
+                    else max(1, int(trainer.effective_batch_size or trainer._target_batch_size() or 2))
+                )
+                metadata["completed_effective_tokens"] = int(completed_effective_tokens)
+                if completed_shards > 0 and (completed_effective_tokens % completed_shards) != 0:
+                    _plan_b_log(
+                        f"Mixed shard batch sizes this epoch: completed_shards={completed_shards}, "
+                        f"completed_effective_tokens={completed_effective_tokens}, "
+                        f"reporting average batch_size={metadata['batch_size']}"
+                    )
                 success = trainer.submit_delta(metadata)
                 if not success:
                     _plan_b_log("Delta upload failed, re-registering and retrying once")
