@@ -1,0 +1,18 @@
+[Unit]
+Description=Alice full-model download queue
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/alice-download-queue
+Environment=PYTHONUNBUFFERED=1
+Environment=DL_MAX_CONCURRENT=8
+Environment=DL_TIMEOUT=1200
+Environment=DL_SLOT_ESTIMATE=960
+ExecStart=/root/alice-download-queue/.venv/bin/gunicorn -w 1 -b 127.0.0.1:8095 queue_server:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
