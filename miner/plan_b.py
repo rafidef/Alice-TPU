@@ -933,6 +933,13 @@ class LocalTrainer:
         if target_version is None or target_version <= self.current_model_version:
             return
         available_update_version = min(target_version, max(0, published_update_version))
+        if self.current_model_version > available_update_version:
+            _plan_b_log(
+                f"Local v{self.current_model_version} is ahead of published updates v{available_update_version}; downloading fresh full model"
+            )
+            full_version = self._select_full_download_version(target_version, bootstrap_version)
+            self.download_full_model(full_version, mirror_urls=full_model_base_urls)
+            return
         gap = available_update_version - self.current_model_version
         if gap > MAX_INCREMENTAL_CATCHUP_GAP:
             _plan_b_log(
