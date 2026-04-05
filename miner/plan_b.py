@@ -44,6 +44,7 @@ DEFAULT_MODEL_QUEUE_BASE_URL = _normalize_url(os.environ.get("ALICE_MODEL_QUEUE_
 DOWNLOAD_QUEUE_POLL_S = max(5, int(os.environ.get("ALICE_MODEL_QUEUE_POLL_S", "30") or 30))
 DOWNLOAD_QUEUE_RETRY_S = max(5, int(os.environ.get("ALICE_MODEL_QUEUE_RETRY_S", "10") or 10))
 DOWNLOAD_QUEUE_HEARTBEAT_S = max(15, int(os.environ.get("ALICE_MODEL_QUEUE_HEARTBEAT_S", "60") or 60))
+MAX_QUEUE_POLL_FAILURES = max(1, int(os.environ.get("ALICE_MODEL_QUEUE_MAX_POLL_FAILURES", "5") or 5))
 
 
 def _extract_tokens(shard_data: Any) -> torch.Tensor:
@@ -518,6 +519,11 @@ class LocalTrainer:
                 timeout=5,
             )
 
+    def _fallback_from_queue_wait(self, queue_url: str, queue_id: str, version: int, model_path: Path, reason: str) -> None:
+        _plan_b_log(reason)
+        self._complete_download_queue(queue_url, queue_id, "")
+        self._download_full_model_direct(version, model_path)
+
     def _download_full_model_static(self, version: int, model_path: Path, download_token: str) -> None:
         model_filename = f"v{version}_full.pt"
         file_url = f"{self.model_queue_base_url}/models/{model_filename}?token={download_token}"
@@ -535,6 +541,7 @@ class LocalTrainer:
             return
 
         queue_id = str(data.get("queue_id", "")).strip()
+        consecutive_poll_failures = 0
         while True:
             position = int(data.get("position", -1) or -1)
             if position == 0:
@@ -564,6 +571,7 @@ class LocalTrainer:
                     self._download_full_model_direct(version, model_path)
                     return
                 queue_id = str(data.get("queue_id", "")).strip()
+                consecutive_poll_failures = 0
                 continue
 
             wait_seconds = max(0, int(data.get("wait_seconds", DOWNLOAD_QUEUE_POLL_S) or DOWNLOAD_QUEUE_POLL_S))
@@ -573,14 +581,49 @@ class LocalTrainer:
                 resp = requests.get(queue_url, params={"queue_id": queue_id}, timeout=10)
                 if resp.status_code == 404:
                     data = {"status": "not_found", "position": -1}
+                    consecutive_poll_failures = 0
                     continue
                 if resp.status_code != 200:
+                    consecutive_poll_failures += 1
                     print("[DOWNLOAD] Queue check failed, retrying...")
+                    if consecutive_poll_failures >= MAX_QUEUE_POLL_FAILURES:
+                        self._fallback_from_queue_wait(
+                            queue_url,
+                            queue_id,
+                            version,
+                            model_path,
+                            f"Queue polling failed {MAX_QUEUE_POLL_FAILURES} times, falling back to /model download",
+                        )
+                        return
                     time.sleep(DOWNLOAD_QUEUE_RETRY_S)
                     continue
                 data = resp.json()
+                consecutive_poll_failures = 0
+            except ValueError:
+                consecutive_poll_failures += 1
+                print("[DOWNLOAD] Queue returned invalid JSON, retrying...")
+                if consecutive_poll_failures >= MAX_QUEUE_POLL_FAILURES:
+                    self._fallback_from_queue_wait(
+                        queue_url,
+                        queue_id,
+                        version,
+                        model_path,
+                        f"Queue polling returned invalid JSON {MAX_QUEUE_POLL_FAILURES} times, falling back to /model download",
+                    )
+                    return
+                time.sleep(DOWNLOAD_QUEUE_RETRY_S)
             except requests.RequestException:
+                consecutive_poll_failures += 1
                 print("[DOWNLOAD] Queue check failed, retrying...")
+                if consecutive_poll_failures >= MAX_QUEUE_POLL_FAILURES:
+                    self._fallback_from_queue_wait(
+                        queue_url,
+                        queue_id,
+                        version,
+                        model_path,
+                        f"Queue polling failed {MAX_QUEUE_POLL_FAILURES} times, falling back to /model download",
+                    )
+                    return
                 time.sleep(DOWNLOAD_QUEUE_RETRY_S)
 
     def _find_best_local_model(self, target_version: Optional[int]) -> Optional[int]:
@@ -875,10 +918,12 @@ def run_plan_b(args: Any) -> None:
                 trainer.save_global_snapshot()
                 completed_shards = 0
                 completed_effective_tokens = 0
+                needs_re_registration = False
 
                 while not trainer.epoch_ending():
                     if heartbeat_re_register is not None and heartbeat_re_register.is_set():
                         _plan_b_log("Re-registering before next shard assignment")
+                        needs_re_registration = True
                         break
                     task, status = miner_lib.request_task_with_retry(
                         data_plane_url,
@@ -893,6 +938,7 @@ def run_plan_b(args: Any) -> None:
                         continue
                     if status == "re_register" or task is None:
                         _plan_b_log("Task request requires re-registration")
+                        needs_re_registration = True
                         break
 
                     trainer.update_task_batch_size(task)
@@ -918,7 +964,16 @@ def run_plan_b(args: Any) -> None:
                     completed_effective_tokens += int(shard_batch_size)
 
                 if heartbeat_re_register is not None and heartbeat_re_register.is_set():
+                    needs_re_registration = True
+                if needs_re_registration:
+                    if completed_shards == 0:
+                        _plan_b_log("Zero shards trained before re-registration, skipping delta submission")
                     break
+
+                if completed_shards == 0:
+                    _plan_b_log("Zero shards trained this epoch, skipping delta submission")
+                    wait_for_next_epoch(trainer)
+                    continue
 
                 metadata = trainer.compute_and_compress_delta()
                 metadata["completed_shards"] = completed_shards
