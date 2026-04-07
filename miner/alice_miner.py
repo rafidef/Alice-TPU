@@ -1674,6 +1674,15 @@ def _model_file_path(model_dir: Path, version: int) -> Path:
     return model_dir / f"alice-7b-v{int(version)}.pt"
 
 
+def _select_static_publication_version(info: Dict[str, Any], target_version: int) -> int:
+    published_full_version = int(info.get("published_full_version", 0) or 0)
+    legacy_version = int(info.get("version", 0) or 0)
+    selected = published_full_version if published_full_version > 0 else legacy_version
+    if selected <= 0:
+        return int(target_version)
+    return max(1, min(int(target_version), selected))
+
+
 def read_local_version(model_dir: Path) -> Optional[int]:
     vf = _model_version_file(model_dir)
     if not vf.exists():
@@ -1811,8 +1820,9 @@ def ensure_cached_model(
 
         # full download (only when no local model exists at all)
         target = _model_file_path(model_dir, ps_version)
-        ok, total_bytes = download_partial_model_with_retry(
+        ok, total_bytes, downloaded_version = download_partial_model_with_retry(
             ps_url,
+            target_version=ps_version,
             assigned_layers=assigned_layers,
             model_path=target,
             auth_token=auth_token,
@@ -1821,11 +1831,42 @@ def ensure_cached_model(
         )
         if not ok:
             raise RuntimeError('model download failed after retries')
-        save_hash(target)
-        write_local_version(model_dir, ps_version)
+        stored_version = int(downloaded_version or ps_version)
+        stored_path = _model_file_path(model_dir, stored_version)
+        if target != stored_path:
+            with contextlib.suppress(Exception):
+                stored_path.unlink()
+            with contextlib.suppress(Exception):
+                Path(str(stored_path) + '.sha256').unlink()
+            target.replace(stored_path)
+        else:
+            stored_path = target
+        save_hash(stored_path)
+        write_local_version(model_dir, stored_version)
+        if stored_version < ps_version:
+            print(
+                f"[Model] 静态发布仅到 v{stored_version}，目标为 v{ps_version}，"
+                "尝试补 delta 更新"
+            )
+            delta_resp = request_delta_update(ps_url, stored_version, auth_token=auth_token)
+            if delta_resp and delta_resp.get('status') == 'ok':
+                delta_data = delta_resp.get('delta')
+                to_version = int(delta_resp.get('to_version', ps_version) or ps_version)
+                if to_version == ps_version and isinstance(delta_data, dict):
+                    new_path = _model_file_path(model_dir, ps_version)
+                    if apply_delta_update(stored_path, new_path, delta_data, stored_version, ps_version):
+                        save_hash(new_path)
+                        write_local_version(model_dir, ps_version)
+                        cleanup_old_versions(model_dir, keep=KEEP_VERSIONS)
+                        print(f"[Model] ✓ 模型就绪: {new_path} ({total_bytes / 1e9:.2f} GB + delta)")
+                        return new_path, True
+            print(
+                f"[Model] 发布工件仍停留在 v{stored_version}，delta 未就绪；"
+                "保留已下载发布版本，等待下一轮补齐"
+            )
         cleanup_old_versions(model_dir, keep=KEEP_VERSIONS)
-        print(f"[Model] ✓ 模型就绪: {target} ({total_bytes / 1e9:.2f} GB)")
-        return target, True
+        print(f"[Model] ✓ 模型就绪: {stored_path} ({total_bytes / 1e9:.2f} GB)")
+        return stored_path, True
 
 
 def download_model_streaming(ps_url: str, save_path: Path, auth_token: Optional[str] = None) -> bool:
@@ -2285,10 +2326,11 @@ def _shard_download_tmp_path(shard_id: int) -> Path:
 
 def _download_partial_model_from_nginx(
     ps_url: str,
+    target_version: int,
     assigned_layers: List[int],
     model_path: Path,
     auth_token: Optional[str] = None,
-) -> Tuple[bool, int]:
+) -> Tuple[bool, int, int]:
     """Try static file download via nginx using /model/info metadata.
 
     Supports multi-mirror fallback and resume via HTTP Range.
@@ -2306,7 +2348,7 @@ def _download_partial_model_from_nginx(
     if not base_urls:
         raise RuntimeError("No static model base_url available")
 
-    version = int(info.get("version", 0))
+    version = _select_static_publication_version(info, target_version)
     available_layers = info.get("available_layers") or [4, 8, 12, 16, 20, 24, 32]
     bucket = _best_layer_bucket(len(assigned_layers), available_layers)
     file_name = f"v{version}_layers_0-{bucket-1}.pt"
@@ -2328,12 +2370,12 @@ def _download_partial_model_from_nginx(
                         if remote_size > 0 and remote_size == local_size:
                             _ = torch.load(model_path, map_location="cpu", mmap=True, weights_only=True)
                             print(f"✅ Reusing cached static model: {model_path.name}")
-                            return True, local_size
+                            return True, local_size, version
 
             total_bytes = _stream_download_with_resume(file_url, tmp_path, timeout_s=600)
             _ = torch.load(tmp_path, map_location="cpu", mmap=True, weights_only=True)
             os.replace(tmp_path, model_path)
-            return True, total_bytes
+            return True, total_bytes, version
         except Exception as exc:
             last_error = exc
             print(f"⚠️ Static source failed ({file_url}): {exc}")
@@ -2341,17 +2383,18 @@ def _download_partial_model_from_nginx(
 
     if last_error is not None:
         raise last_error
-    return False, 0
+    return False, 0, version
 
 
 def download_partial_model_with_retry(
     ps_url: str,
+    target_version: int,
     assigned_layers: List[int],
     model_path: Path,
     auth_token: Optional[str] = None,
     max_attempts: int = 3,
     retry_delay: int = 10,
-) -> Tuple[bool, int]:
+) -> Tuple[bool, int, int]:
     """
     Download assigned layers with retry and corruption check.
 
@@ -2367,15 +2410,16 @@ def download_partial_model_with_retry(
 
             # Preferred path: nginx static model files.
             try:
-                ok, total_bytes = _download_partial_model_from_nginx(
+                ok, total_bytes, downloaded_version = _download_partial_model_from_nginx(
                     ps_url=ps_url,
+                    target_version=target_version,
                     assigned_layers=assigned_layers,
                     model_path=model_path,
                     auth_token=auth_token,
                 )
                 if ok:
                     print("✅ Static model download success")
-                    return True, total_bytes
+                    return True, total_bytes, downloaded_version
             except Exception as static_err:
                 print(f"⚠️ Static model download failed, fallback to PS API: {static_err}")
 
@@ -2391,14 +2435,14 @@ def download_partial_model_with_retry(
             )
             _ = torch.load(tmp_path, map_location="cpu", mmap=True, weights_only=True)
             os.replace(tmp_path, model_path)
-            return True, total_bytes
+            return True, total_bytes, int(target_version)
 
         except Exception as e:
             print(f"⚠️ Model download failed, retrying... ({attempt}/{max_attempts}) error={e}")
             if attempt < max_attempts:
                 time.sleep(retry_delay)
 
-    return False, 0
+    return False, 0, int(target_version)
 
 
 def format_uptime(seconds: float) -> str:
