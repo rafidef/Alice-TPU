@@ -5,7 +5,7 @@ Add TPU compatibility to this miner fork so it can run on:
 - single-VM TPU setups (for example `v5litepod-1`, `v5litepod-4`)
 - multi-host TPU setups (for example `v5litepod-8`, 2 VMs) where the miner is started only on VM-0 and VM-0 initializes VM-1 automatically
 
-## Existing default miner command
+## Existing default miner command (current GPU-named instance ID)
 ```bash
 ./miner/bootstrap.sh --ps-url https://ps.aliceprotocol.org --address a2x49BLY9JUxmsU8pdFet7w4Bb2KVkZ9DJbmXb91jjcZzdzHZ --reward-address a2x49BLY9JUxmsU8pdFet7w4Bb2KVkZ9DJbmXb91jjcZzdzHZ --instance-id gpu0
 ```
@@ -35,5 +35,5 @@ python3 -m unittest discover -s docs/vps3_download_queue -p 'test*.py'
 Use this as the initial task command/prompt in Jules:
 
 ```text
-Implement TPU compatibility for this repository so the miner supports single-VM TPU (v5litepod-1/v5litepod-4) and multi-host TPU (v5litepod-8 with 2 VMs) where miner runs only on VM-0 and VM-0 initializes VM-1. Keep existing GPU behavior unchanged. Start from: ./miner/bootstrap.sh --ps-url https://ps.aliceprotocol.org --address a2x49BLY9JUxmsU8pdFet7w4Bb2KVkZ9DJbmXb91jjcZzdzHZ --reward-address a2x49BLY9JUxmsU8pdFet7w4Bb2KVkZ9DJbmXb91jjcZzdzHZ --instance-id gpu0
+Implement TPU compatibility for this repository so the miner supports single-VM TPU (v5litepod-1/v5litepod-4) and multi-host TPU (v5litepod-8 with 2 VMs) where miner runs only on VM-0 and VM-0 initializes VM-1. Keep existing GPU behavior unchanged. Use a TPU-oriented instance ID. Start from: ./miner/bootstrap.sh --ps-url https://ps.aliceprotocol.org --address a2x49BLY9JUxmsU8pdFet7w4Bb2KVkZ9DJbmXb91jjcZzdzHZ --reward-address a2x49BLY9JUxmsU8pdFet7w4Bb2KVkZ9DJbmXb91jjcZzdzHZ --instance-id tpu0
 ```
