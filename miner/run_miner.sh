@@ -124,10 +124,10 @@ sanitize_tpu_process_addresses() {
       echo "⚠️ Ignoring invalid TPU process address entry: ${entry}"
       continue
     fi
-    if [[ "$entry" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*:([0-9]{1,5})$ ]]; then
+    if [[ "$entry" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*:[0-9]{1,5}$ ]]; then
       local port
-      port="${BASH_REMATCH[6]}"
-      if (( port < 0 || port > 65535 )); then
+      port="${entry##*:}"
+      if (( port > 65535 )); then
         echo "⚠️ Ignoring invalid TPU process address entry: ${entry}"
         continue
       fi
@@ -143,7 +143,7 @@ sanitize_tpu_process_addresses() {
     return 0
   fi
 
-  export TPU_PROCESS_ADDRESSES="$(IFS=, ; echo "${valid[*]}")"
+  export TPU_PROCESS_ADDRESSES="$(IFS=, ; printf '%s' "${valid[*]}")"
 }
 
 is_tpu_runtime=false
