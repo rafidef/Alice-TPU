@@ -15,6 +15,7 @@ try:
 except ImportError:
     fcntl = None
 import hashlib
+import ipaddress
 import json
 import logging
 import math
@@ -80,6 +81,54 @@ def _parse_tpu_worker_hosts(raw_hosts: Optional[str]) -> List[str]:
     return hosts
 
 
+def _is_valid_tpu_worker_host(value: str) -> bool:
+    # Keep this strict to match libtpu expectations in this project: DNS hostnames
+    # or plain IP literals without port separators. This intentionally rejects
+    # colon-delimited values to avoid accepting host:port and malformed warning text.
+    host = str(value or "").strip()
+    if not host or ":" in host or "/" in host:
+        # Reject host:port and path-like inputs that libtpu cannot parse here.
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    labels = host.split(".")
+    if not labels:
+        return False
+    for label in labels:
+        if not label or len(label) > 63:  # RFC 1035 label length limit.
+            return False
+        if label[0] == "-" or label[-1] == "-":
+            return False
+        for ch in label:
+            if not (ch.isalnum() or ch == "-"):
+                return False
+    return True
+
+
+def _sanitize_tpu_worker_host_env() -> List[str]:
+    raw = os.environ.get("TPU_WORKER_HOSTNAMES") or os.environ.get("ALICE_TPU_WORKERS") or ""
+    parsed = _parse_tpu_worker_hosts(raw)
+    valid_hosts: List[str] = []
+    for host in parsed:
+        if _is_valid_tpu_worker_host(host) and host not in valid_hosts:
+            valid_hosts.append(host)
+    if valid_hosts:
+        host_csv = ",".join(valid_hosts)
+        os.environ["TPU_WORKER_HOSTNAMES"] = host_csv
+        os.environ["ALICE_TPU_WORKERS"] = host_csv
+    else:
+        if parsed:
+            logging.warning(
+                "Ignoring malformed TPU worker hostnames in env; unset TPU_WORKER_HOSTNAMES/ALICE_TPU_WORKERS"
+            )
+        os.environ.pop("TPU_WORKER_HOSTNAMES", None)
+        os.environ.pop("ALICE_TPU_WORKERS", None)
+    return valid_hosts
+
+
 def detect_tpu_runtime() -> Dict[str, Any]:
     marker_vars = (
         "TPU_NAME",
@@ -94,9 +143,7 @@ def detect_tpu_runtime() -> Dict[str, Any]:
     if not env_marked and os.environ.get("ALICE_FORCE_TPU") != "1":
         return {"detected": False, "available": False}
 
-    worker_hosts = _parse_tpu_worker_hosts(
-        os.environ.get("TPU_WORKER_HOSTNAMES") or os.environ.get("ALICE_TPU_WORKERS")
-    )
+    worker_hosts = _sanitize_tpu_worker_host_env()
     worker_id_raw = str(os.environ.get("TPU_WORKER_ID", "0")).strip() or "0"
     try:
         worker_id = int(worker_id_raw)
