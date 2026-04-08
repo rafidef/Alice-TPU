@@ -67,8 +67,12 @@ if [[ "$HAS_PS_URL" == false ]]; then
   set -- --ps-url "$DEFAULT_PS_URL" "$@"
 fi
 
+is_tpu_environment() {
+  [[ "${PJRT_DEVICE:-}" == "TPU" || -n "${TPU_NAME:-}" || -n "${TPU_WORKER_HOSTNAMES:-}" || -n "${TPU_WORKER_ID:-}" || -n "${TPU_ACCELERATOR_TYPE:-}" || -n "${TPU_TYPE:-}" || -n "${ACCELERATOR_TYPE:-}" ]]
+}
+
 is_tpu_runtime=false
-if [[ "${PJRT_DEVICE:-}" == "TPU" || -n "${TPU_NAME:-}" || -n "${TPU_WORKER_HOSTNAMES:-}" || -n "${TPU_WORKER_ID:-}" || -n "${TPU_ACCELERATOR_TYPE:-}" || -n "${TPU_TYPE:-}" || -n "${ACCELERATOR_TYPE:-}" ]]; then
+if is_tpu_environment; then
   is_tpu_runtime=true
 fi
 
@@ -102,7 +106,7 @@ if [[ "$is_tpu_runtime" == true ]]; then
               continue
             fi
             printf -v remote_args_escaped '%q ' "$@"
-            remote_instance_suffix="${idx//[^0-9]/}"
+            remote_instance_suffix="${idx}"
             remote_instance_id="tpu${remote_instance_suffix}"
             if [[ -z "$remote_instance_suffix" ]]; then
               echo "⚠️ Skipping worker with invalid index '${idx}'"

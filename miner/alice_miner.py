@@ -462,7 +462,7 @@ def detect_device_info(device_override: Optional[str] = None) -> Dict[str, Any]:
     arch = platform.machine().lower()
 
     return {
-        "device": "tpu" if device_type == "xla" else device_type,
+        "device": device_type,
         "device_type": device_type,
         "device_name": device_name,
         "memory_gb": float(memory_gb),
@@ -481,6 +481,7 @@ def detect_device_info(device_override: Optional[str] = None) -> Dict[str, Any]:
         "gpu_model": gpu_model,
         "gpu_vram_gb": float(gpu_vram_gb),
         "gpu_count": gpu_count,
+        "accelerator": "tpu" if device_type == "xla" else "",
         "tpu_worker_count": int(tpu_runtime.get("worker_count", 1) or 1) if device_type == "xla" else 0,
         "tpu_worker_id": int(tpu_runtime.get("worker_id", 0) or 0) if device_type == "xla" else 0,
         "python": platform.python_version(),
@@ -738,7 +739,9 @@ def tpu_mark_step_if_available(device_type: str) -> None:
     try:
         import torch_xla.core.xla_model as xm  # type: ignore
         xm.mark_step()
-    except Exception:
+    except Exception as exc:
+        if os.environ.get("ALICE_TPU_DEBUG") == "1":
+            print(f"[TPU] mark_step skipped: {exc}")
         return
 
 
