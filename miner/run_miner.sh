@@ -127,7 +127,7 @@ sanitize_tpu_process_addresses() {
     if [[ "$entry" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*:[0-9]{1,5}$ ]]; then
       local port
       port="${entry##*:}"
-      if (( port > 65535 )); then
+      if (( port == 0 || port > 65535 )); then
         echo "⚠️ Ignoring invalid TPU process address entry: ${entry}"
         continue
       fi
