@@ -20,6 +20,62 @@ import plan_b
 
 
 class PlanBHotfixTests(unittest.TestCase):
+    def test_load_model_from_state_dict_moves_model_without_assigning_param_data(self) -> None:
+        trainer = plan_b.LocalTrainer.__new__(plan_b.LocalTrainer)
+        trainer.args = mock.Mock(precision="auto")
+        trainer.device = torch.device("xla")
+
+        class _NoSetData:
+            def __init__(self) -> None:
+                self._data = torch.tensor([1.0], dtype=torch.float32)
+
+            @property
+            def data(self) -> torch.Tensor:
+                return self._data
+
+            @data.setter
+            def data(self, value: torch.Tensor) -> None:
+                raise AssertionError("param/buffer .data assignment should not be used")
+
+        class _DummyModel:
+            def __init__(self) -> None:
+                self.to_called_with = None
+                self.parameters_calls = 0
+                self.buffers_calls = 0
+
+            def load_state_dict(self, *_args, **_kwargs) -> None:
+                return None
+
+            def gradient_checkpointing_enable(self) -> None:
+                return None
+
+            def to(self, device: torch.device) -> "_DummyModel":
+                self.to_called_with = device
+                return self
+
+            def parameters(self):
+                self.parameters_calls += 1
+                return [_NoSetData()]
+
+            def buffers(self):
+                self.buffers_calls += 1
+                return [_NoSetData()]
+
+        dummy_model = _DummyModel()
+        state_dict = {
+            "model.embed_tokens.weight": torch.zeros((8, 16), dtype=torch.float32),
+            "model.layers.0.mlp.gate_proj.weight": torch.zeros((32, 16), dtype=torch.float32),
+            "model.layers.0.self_attn.rotary_emb.inv_freq": torch.ones((4,), dtype=torch.float32),
+        }
+
+        with mock.patch.object(plan_b.miner_lib, "AliceForCausalLM", return_value=dummy_model):
+            loaded_model = trainer._load_model_from_state_dict(state_dict)
+
+        self.assertIs(loaded_model, dummy_model)
+        self.assertEqual(dummy_model.to_called_with, trainer.device)
+        self.assertEqual(dummy_model.parameters_calls, 0)
+        self.assertEqual(dummy_model.buffers_calls, 0)
+
     def test_apply_epoch_updates_redownloads_full_model_when_local_is_ahead_of_published_updates(self) -> None:
         trainer = plan_b.LocalTrainer.__new__(plan_b.LocalTrainer)
         trainer.model = object()
