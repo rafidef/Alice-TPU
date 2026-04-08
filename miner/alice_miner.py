@@ -87,6 +87,7 @@ def _is_valid_tpu_worker_host(value: str) -> bool:
     # colon-delimited values to avoid accepting host:port and malformed warning text.
     host = str(value or "").strip()
     if not host or ":" in host or "/" in host:
+        # Reject host:port and path-like inputs that libtpu cannot parse here.
         return False
     try:
         ipaddress.ip_address(host)
@@ -97,7 +98,7 @@ def _is_valid_tpu_worker_host(value: str) -> bool:
     if not labels:
         return False
     for label in labels:
-        if not label or len(label) > 63:
+        if not label or len(label) > 63:  # RFC 1035 label length limit.
             return False
         if label[0] == "-" or label[-1] == "-":
             return False
