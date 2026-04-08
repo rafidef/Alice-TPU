@@ -76,10 +76,17 @@ is_safe_tpu_host() {
   [[ "$1" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*$ ]]
 }
 
+trim_whitespace() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
 resolve_tpu_host() {
   local raw="$1"
   local host
-  host="$(echo "${raw}" | xargs)"
+  host="$(trim_whitespace "${raw}")"
   if [[ -z "$host" ]]; then
     return 1
   fi
@@ -87,9 +94,9 @@ resolve_tpu_host() {
     echo "$host"
     return 0
   fi
-  if [[ "$host" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
+  if [[ "$host" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
     local from_env="${!host:-}"
-    from_env="$(echo "${from_env}" | xargs)"
+    from_env="$(trim_whitespace "${from_env}")"
     if [[ -n "$from_env" ]] && is_safe_tpu_host "$from_env"; then
       echo "$from_env"
       return 0
@@ -100,7 +107,7 @@ resolve_tpu_host() {
 
 sanitize_tpu_process_addresses() {
   local raw="${TPU_PROCESS_ADDRESSES:-}"
-  if [[ -z "$(echo "${raw}" | xargs)" ]]; then
+  if [[ -z "${raw//[[:space:]]/}" ]]; then
     return 0
   fi
 
@@ -109,7 +116,7 @@ sanitize_tpu_process_addresses() {
   IFS=',' read -r -a entries <<< "$raw"
   for raw_entry in "${entries[@]}"; do
     local entry
-    entry="$(echo "${raw_entry}" | xargs)"
+    entry="$(trim_whitespace "${raw_entry}")"
     if [[ -z "$entry" ]]; then
       continue
     fi
@@ -117,7 +124,13 @@ sanitize_tpu_process_addresses() {
       echo "⚠️ Ignoring invalid TPU process address entry: ${entry}"
       continue
     fi
-    if [[ "$entry" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*:[0-9]{1,5}$ ]]; then
+    if [[ "$entry" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*:([0-9]{1,5})$ ]]; then
+      local port
+      port="${BASH_REMATCH[6]}"
+      if (( port < 0 || port > 65535 )); then
+        echo "⚠️ Ignoring invalid TPU process address entry: ${entry}"
+        continue
+      fi
       valid+=("$entry")
     else
       echo "⚠️ Ignoring invalid TPU process address entry: ${entry}"
@@ -155,7 +168,7 @@ if [[ "$is_tpu_runtime" == true ]]; then
     IFS=',' read -r -a tpu_hosts <<< "$tpu_hosts_raw"
     for raw_host in "${tpu_hosts[@]}"; do
       if ! host="$(resolve_tpu_host "${raw_host}")"; then
-        echo "⚠️ Skipping unsafe TPU host entry: $(echo "${raw_host}" | xargs)"
+        echo "⚠️ Skipping unsafe TPU host entry: $(trim_whitespace "${raw_host}")"
         continue
       fi
       tpu_hosts_sanitized+=("$host")
