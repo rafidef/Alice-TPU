@@ -97,15 +97,21 @@ if [[ "$is_tpu_runtime" == true ]]; then
             if [[ -z "$host" ]]; then
               continue
             fi
-            if [[ ! "$host" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            if [[ ! "$host" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*$ ]]; then
               echo "⚠️ Skipping unsafe TPU host entry: $host"
               continue
             fi
             printf -v remote_args_escaped '%q ' "$@"
-            remote_instance_id="tpu${idx}"
+            remote_instance_suffix="${idx//[^0-9]/}"
+            remote_instance_id="tpu${remote_instance_suffix}"
+            if [[ -z "$remote_instance_suffix" ]]; then
+              echo "⚠️ Skipping worker with invalid index '${idx}'"
+              continue
+            fi
+            remote_instance_escaped="$(printf '%q' "$remote_instance_id")"
             echo "[TPU] Starting remote worker ${idx} on ${host} (instance-id=${remote_instance_id})"
             if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" \
-              "cd ${root_dir_escaped} && ALICE_TPU_REMOTE_STARTED=1 ALICE_TPU_DISABLE_REMOTE_START=1 PJRT_DEVICE=TPU nohup ./miner/run_miner.sh ${remote_args_escaped} --instance-id ${remote_instance_id} >/tmp/alice-miner-${remote_instance_id}.log 2>&1 < /dev/null &"; then
+              "cd ${root_dir_escaped} && ALICE_TPU_REMOTE_STARTED=1 ALICE_TPU_DISABLE_REMOTE_START=1 PJRT_DEVICE=TPU nohup ./miner/run_miner.sh ${remote_args_escaped} --instance-id ${remote_instance_escaped} >/tmp/alice-miner-${remote_instance_escaped}.log 2>&1 < /dev/null &"; then
               echo "⚠️ Failed to start remote TPU worker on ${host}; continue running local coordinator"
             fi
           done

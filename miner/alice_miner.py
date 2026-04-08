@@ -125,6 +125,14 @@ def detect_tpu_runtime() -> Dict[str, Any]:
         xla_error = str(exc)
         available = False
 
+    if worker_hosts:
+        worker_count = len(worker_hosts)
+    else:
+        try:
+            worker_count = int(str(os.environ.get("TPU_WORKER_COUNT") or "1").strip() or "1")
+        except ValueError:
+            worker_count = 1
+
     return {
         "detected": True,
         "available": available,
@@ -132,10 +140,17 @@ def detect_tpu_runtime() -> Dict[str, Any]:
         "accelerator": accelerator,
         "memory_gb": float(max(1.0, memory_gb)),
         "worker_hosts": worker_hosts,
-        "worker_count": max(1, len(worker_hosts) or int(os.environ.get("TPU_WORKER_COUNT", "1") or 1)),
+        "worker_count": max(1, worker_count),
         "worker_id": max(0, worker_id),
         "chip_count": max(1, chip_count),
     }
+
+
+def normalize_device_type(device_value: Optional[str]) -> str:
+    selected = str(device_value or "").strip().lower()
+    if selected == "tpu":
+        return "xla"
+    return selected
 
 
 def configure_timestamp_logging() -> None:
@@ -381,9 +396,7 @@ def _read_cpu_model() -> str:
 def detect_device_info(device_override: Optional[str] = None) -> Dict[str, Any]:
     tpu_runtime = detect_tpu_runtime()
     detected_device, detected_memory_gb, detected_name = auto_detect_device()
-    device_type = (device_override or detected_device).lower()
-    if device_type == "tpu":
-        device_type = "xla"
+    device_type = normalize_device_type(device_override or detected_device)
 
     if device_type not in {"cuda", "mps", "cpu", "xla"}:
         device_type = detected_device
@@ -562,9 +575,7 @@ def get_hardware_info(device_override: Optional[str] = None) -> Dict[str, Any]:
     """Detect hardware capabilities with optional device override."""
     tpu_runtime = detect_tpu_runtime()
     detected_device, _, _ = auto_detect_device()
-    selected = (device_override or detected_device).lower()
-    if selected == "tpu":
-        selected = "xla"
+    selected = normalize_device_type(device_override or detected_device)
     if selected == "cuda" and not torch.cuda.is_available():
         print("⚠️ --device cuda requested but CUDA is unavailable, falling back to CPU")
     elif selected == "mps" and not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
