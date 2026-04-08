@@ -127,6 +127,16 @@ CUDA_VISIBLE_DEVICES=0 nohup ./miner/run_miner.sh \
   > /tmp/miner_gpu0.log 2>&1 &
 ```
 
+TPU (single VM / multi-host from VM-0):
+
+```bash
+./miner/bootstrap.sh \
+  --ps-url https://ps.aliceprotocol.org \
+  --address YOUR_ADDRESS \
+  --reward-address YOUR_REWARD_ADDRESS \
+  --instance-id tpu0
+```
+
 ## Links
 
 - Website: https://aliceprotocol.org
