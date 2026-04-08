@@ -40,6 +40,8 @@ class PlanBHotfixTests(unittest.TestCase):
         class _DummyModel:
             def __init__(self) -> None:
                 self.to_called_with = None
+                self.parameters_calls = 0
+                self.buffers_calls = 0
 
             def load_state_dict(self, *_args, **_kwargs) -> None:
                 return None
@@ -52,9 +54,11 @@ class PlanBHotfixTests(unittest.TestCase):
                 return self
 
             def parameters(self):
+                self.parameters_calls += 1
                 return [_NoSetData()]
 
             def buffers(self):
+                self.buffers_calls += 1
                 return [_NoSetData()]
 
         dummy_model = _DummyModel()
@@ -69,6 +73,8 @@ class PlanBHotfixTests(unittest.TestCase):
 
         self.assertIs(loaded_model, dummy_model)
         self.assertEqual(dummy_model.to_called_with, trainer.device)
+        self.assertEqual(dummy_model.parameters_calls, 0)
+        self.assertEqual(dummy_model.buffers_calls, 0)
 
     def test_apply_epoch_updates_redownloads_full_model_when_local_is_ahead_of_published_updates(self) -> None:
         trainer = plan_b.LocalTrainer.__new__(plan_b.LocalTrainer)
