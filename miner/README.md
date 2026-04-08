@@ -86,6 +86,22 @@ CUDA_VISIBLE_DEVICES=1 ./miner/run_miner.sh \
   --instance-id gpu1
 ```
 
+## TPU (single VM and multi-host)
+
+Use a TPU-oriented instance id:
+
+```bash
+./miner/bootstrap.sh \
+  --ps-url https://ps.aliceprotocol.org \
+  --address YOUR_ADDRESS \
+  --reward-address YOUR_REWARD_ADDRESS \
+  --instance-id tpu0
+```
+
+On TPU VMs, `run_miner.sh` auto-detects TPU runtime, sets `--device tpu` when missing, and defaults the instance id to `tpu${TPU_WORKER_ID}` when not provided.
+
+For multi-host TPU slices, start only on VM-0. If `TPU_WORKER_HOSTNAMES` (or `ALICE_TPU_WORKERS`) lists multiple hosts, VM-0 will try to start workers on the remaining hosts over SSH automatically.
+
 ## Wallet
 
 Create a wallet:

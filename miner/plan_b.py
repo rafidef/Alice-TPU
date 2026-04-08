@@ -302,7 +302,11 @@ class LocalTrainer:
 
     def _is_oom_error(self, exc: BaseException) -> bool:
         message = str(exc).lower()
-        return isinstance(exc, torch.cuda.OutOfMemoryError) or "out of memory" in message
+        return (
+            isinstance(exc, torch.cuda.OutOfMemoryError)
+            or "out of memory" in message
+            or "resource exhausted" in message
+        )
 
     def save_global_snapshot(self) -> None:
         if self.model is None:
@@ -390,6 +394,7 @@ class LocalTrainer:
                             continue
 
                         loss.backward()
+                        miner_lib.tpu_mark_step_if_available(self.device.type)
                         total_loss += float(loss.item())
                         num_batches += 1
                         start_idx += len(batch_inputs) * seq_len

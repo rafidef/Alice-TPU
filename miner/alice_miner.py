@@ -71,6 +71,88 @@ MEASURED_MODEL_PARAMS_B = MEASURED_MODEL_PARAMS / 1_000_000_000.0
 MEASURED_TFLOPS_EMA_ALPHA = 0.35
 
 
+def _parse_tpu_worker_hosts(raw_hosts: Optional[str]) -> List[str]:
+    hosts: List[str] = []
+    for host in str(raw_hosts or "").split(","):
+        value = host.strip()
+        if value and value not in hosts:
+            hosts.append(value)
+    return hosts
+
+
+def detect_tpu_runtime() -> Dict[str, Any]:
+    marker_vars = (
+        "TPU_NAME",
+        "TPU_WORKER_ID",
+        "TPU_WORKER_HOSTNAMES",
+        "TPU_ACCELERATOR_TYPE",
+        "TPU_TYPE",
+        "ACCELERATOR_TYPE",
+    )
+    marker_values = {name: str(os.environ.get(name, "")).strip() for name in marker_vars}
+    env_marked = any(marker_values.values()) or str(os.environ.get("PJRT_DEVICE", "")).strip().upper() == "TPU"
+    if not env_marked and os.environ.get("ALICE_FORCE_TPU") != "1":
+        return {"detected": False, "available": False}
+
+    worker_hosts = _parse_tpu_worker_hosts(
+        os.environ.get("TPU_WORKER_HOSTNAMES") or os.environ.get("ALICE_TPU_WORKERS")
+    )
+    worker_id_raw = str(os.environ.get("TPU_WORKER_ID", "0")).strip() or "0"
+    try:
+        worker_id = int(worker_id_raw)
+    except ValueError:
+        worker_id = 0
+
+    visible_chips = _parse_tpu_worker_hosts(os.environ.get("TPU_VISIBLE_CHIPS"))
+    chip_count = len(visible_chips) if visible_chips else 1
+    memory_gb_raw = str(os.environ.get("ALICE_TPU_MEMORY_GB", "16")).strip()
+    try:
+        memory_gb = float(memory_gb_raw)
+    except ValueError:
+        memory_gb = 16.0
+    accelerator = (
+        str(os.environ.get("TPU_ACCELERATOR_TYPE") or os.environ.get("TPU_TYPE") or "Google TPU")
+        .strip()
+        or "Google TPU"
+    )
+
+    try:
+        import torch_xla.core.xla_model as xm  # type: ignore
+        _ = xm.xla_device()
+        xla_error = ""
+        available = True
+    except Exception as exc:
+        xla_error = str(exc)
+        available = False
+
+    if worker_hosts:
+        worker_count = len(worker_hosts)
+    else:
+        try:
+            worker_count = int(str(os.environ.get("TPU_WORKER_COUNT") or "1").strip() or "1")
+        except ValueError:
+            worker_count = 1
+
+    return {
+        "detected": True,
+        "available": available,
+        "error": xla_error,
+        "accelerator": accelerator,
+        "memory_gb": float(max(1.0, memory_gb)),
+        "worker_hosts": worker_hosts,
+        "worker_count": max(1, worker_count),
+        "worker_id": max(0, worker_id),
+        "chip_count": max(1, chip_count),
+    }
+
+
+def normalize_device_type(device_value: Optional[str]) -> str:
+    selected = str(device_value or "").strip().lower()
+    if selected == "tpu":
+        return "xla"
+    return selected
+
+
 def configure_timestamp_logging() -> None:
     logging.basicConfig(
         format="%(asctime)s %(message)s",
@@ -217,6 +299,12 @@ def resolve_batch_size(
 
 def auto_detect_device() -> Tuple[str, float, str]:
     """Auto-detect best available device and memory."""
+    tpu_runtime = detect_tpu_runtime()
+    if tpu_runtime.get("detected") and tpu_runtime.get("available"):
+        accelerator = str(tpu_runtime.get("accelerator") or "Google TPU")
+        worker_id = int(tpu_runtime.get("worker_id", 0) or 0)
+        return "xla", float(tpu_runtime.get("memory_gb", 16.0) or 16.0), f"{accelerator} worker-{worker_id}"
+
     if torch.cuda.is_available():
         props = torch.cuda.get_device_properties(0)
         memory_gb = props.total_memory / (1024 ** 3)
@@ -306,15 +394,18 @@ def _read_cpu_model() -> str:
 
 
 def detect_device_info(device_override: Optional[str] = None) -> Dict[str, Any]:
+    tpu_runtime = detect_tpu_runtime()
     detected_device, detected_memory_gb, detected_name = auto_detect_device()
-    device_type = (device_override or detected_device).lower()
+    device_type = normalize_device_type(device_override or detected_device)
 
-    if device_type not in {"cuda", "mps", "cpu"}:
+    if device_type not in {"cuda", "mps", "cpu", "xla"}:
         device_type = detected_device
 
     if device_type == "cuda" and not torch.cuda.is_available():
         device_type = "cpu"
     if device_type == "mps" and not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
+        device_type = "cpu"
+    if device_type == "xla" and not tpu_runtime.get("available"):
         device_type = "cpu"
 
     try:
@@ -343,6 +434,12 @@ def detect_device_info(device_override: Optional[str] = None) -> Dict[str, Any]:
         gpu_model = cpu_model or f"Apple Silicon ({platform.machine()})"
         device_name = gpu_model
         memory_gb = float(ram_gb)
+    elif device_type == "xla":
+        gpu_model = str(tpu_runtime.get("accelerator") or "Google TPU")
+        device_name = f"{gpu_model} worker-{int(tpu_runtime.get('worker_id', 0) or 0)}"
+        memory_gb = float(tpu_runtime.get("memory_gb", detected_memory_gb) or detected_memory_gb or 16.0)
+        gpu_vram_gb = float(memory_gb)
+        gpu_count = int(tpu_runtime.get("chip_count", 1) or 1)
 
     memory_cap_env = os.environ.get("ALICE_MEMORY_CAP_GB")
     if memory_cap_env:
@@ -353,7 +450,14 @@ def detect_device_info(device_override: Optional[str] = None) -> Dict[str, Any]:
         except ValueError:
             pass
 
-    vendor = "nvidia" if device_type == "cuda" else ("apple" if device_type == "mps" else "cpu")
+    if device_type == "cuda":
+        vendor = "nvidia"
+    elif device_type == "mps":
+        vendor = "apple"
+    elif device_type == "xla":
+        vendor = "google"
+    else:
+        vendor = "cpu"
     platform_name = platform.system()
     arch = platform.machine().lower()
 
@@ -369,14 +473,17 @@ def detect_device_info(device_override: Optional[str] = None) -> Dict[str, Any]:
         "os": platform_name,
         "arch": arch,
         "vendor": vendor,
-        "vram_gb": float(gpu_vram_gb if device_type == "cuda" else 0.0),
-        "physical_vram_gb": float(gpu_vram_gb if device_type == "cuda" else 0.0),
+        "vram_gb": float(gpu_vram_gb if device_type in ("cuda", "xla") else 0.0),
+        "physical_vram_gb": float(gpu_vram_gb if device_type in ("cuda", "xla") else 0.0),
         "unified_memory_gb": float(ram_gb if device_type == "mps" else 0.0),
         "ram_gb": float(ram_gb),
         "cpu_model": cpu_model,
         "gpu_model": gpu_model,
         "gpu_vram_gb": float(gpu_vram_gb),
         "gpu_count": gpu_count,
+        "accelerator": "tpu" if device_type == "xla" else "",
+        "tpu_worker_count": int(tpu_runtime.get("worker_count", 1) or 1) if device_type == "xla" else 0,
+        "tpu_worker_id": int(tpu_runtime.get("worker_id", 0) or 0) if device_type == "xla" else 0,
         "python": platform.python_version(),
         "torch": torch.__version__,
     }
@@ -388,6 +495,12 @@ def format_device_log_line(info: Dict[str, Any]) -> str:
         return f"[Device] {info.get('gpu_model', 'CUDA GPU')}, {float(info.get('gpu_vram_gb', 0.0)):.1f}GB VRAM, CUDA"
     if device_type == "mps":
         return f"[Device] {info.get('gpu_model', 'Apple Silicon')}, {float(info.get('ram_gb', 0.0)):.1f}GB unified memory, MPS"
+    if device_type == "xla":
+        return (
+            f"[Device] {info.get('gpu_model', 'Google TPU')}, "
+            f"{float(info.get('memory_gb', 0.0)):.1f}GB/chip, TPU "
+            f"(workers={int(info.get('tpu_worker_count', 1) or 1)})"
+        )
     return f"[Device] {info.get('cpu_model', info.get('device_name', 'CPU-only'))}, {float(info.get('ram_gb', 0.0)):.1f}GB RAM, CPU-only"
 
 
@@ -436,6 +549,8 @@ def select_precision(
         return "fp16"
     if device_type == "mps":
         return "fp16"
+    if device_type == "xla":
+        return "fp32"
     return "fp32"
 
 
@@ -459,13 +574,17 @@ def with_precision_arg(argv: List[str], precision: str) -> List[str]:
 
 def get_hardware_info(device_override: Optional[str] = None) -> Dict[str, Any]:
     """Detect hardware capabilities with optional device override."""
+    tpu_runtime = detect_tpu_runtime()
     detected_device, _, _ = auto_detect_device()
-    selected = (device_override or detected_device).lower()
+    selected = normalize_device_type(device_override or detected_device)
     if selected == "cuda" and not torch.cuda.is_available():
         print("⚠️ --device cuda requested but CUDA is unavailable, falling back to CPU")
     elif selected == "mps" and not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
         print("⚠️ --device mps requested but MPS is unavailable, falling back to CPU")
-    elif selected not in ("cuda", "mps", "cpu"):
+    elif selected == "xla" and not tpu_runtime.get("available"):
+        reason = str(tpu_runtime.get("error") or "torch_xla runtime unavailable")
+        print(f"⚠️ --device tpu/xla requested but TPU runtime is unavailable ({reason}), falling back to CPU")
+    elif selected not in ("cuda", "mps", "cpu", "xla"):
         print(f"⚠️ Unknown --device '{selected}', using auto-detected device '{detected_device}'")
         selected = detected_device
     return detect_device_info(selected)
@@ -607,9 +726,23 @@ def save_device_profile(path: Path, key: str, updates: Dict[str, Any]) -> None:
 def get_physical_device_memory_gb(device_type: str, capabilities: Dict[str, Any]) -> float:
     if device_type == "cuda" and torch.cuda.is_available():
         return float(torch.cuda.get_device_properties(0).total_memory / (1024 ** 3))
+    if device_type == "xla":
+        return float(capabilities.get("memory_gb", capabilities.get("runtime_memory_cap_gb", 16.0)))
     if device_type == "mps":
         return float(capabilities.get("system_memory_gb", capabilities.get("memory_gb", 16.0)))
     return float(capabilities.get("system_memory_gb", capabilities.get("memory_gb", 4.0)))
+
+
+def tpu_mark_step_if_available(device_type: str) -> None:
+    if str(device_type).lower() != "xla":
+        return
+    try:
+        import torch_xla.core.xla_model as xm  # type: ignore
+        xm.mark_step()
+    except Exception as exc:
+        if os.environ.get("ALICE_TPU_DEBUG") == "1":
+            print(f"[TPU] mark_step skipped: {exc}")
+        return
 
 
 def acquire_single_instance_lock(instance_id: str | None = None) -> Any:
@@ -3015,7 +3148,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=0.005,
         help="Plan B TopK delta compression ratio",
     )
-    parser.add_argument("--device", default=None, help="Training device override: cuda|mps|cpu")
+    parser.add_argument("--device", default=None, help="Training device override: cuda|mps|cpu|tpu")
     parser.add_argument(
         "--reward-address",
         default=None,
