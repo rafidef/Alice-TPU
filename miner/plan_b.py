@@ -922,12 +922,7 @@ class LocalTrainer:
             model = model.half()
         if hasattr(model, "gradient_checkpointing_enable"):
             model.gradient_checkpointing_enable()
-        with torch.no_grad():
-            for param in model.parameters():
-                param.data = param.data.to(self.device)
-            for buf in model.buffers():
-                buf.data = buf.data.to(self.device)
-        return model
+        return model.to(self.device)
 
     def download_full_model(
         self,
