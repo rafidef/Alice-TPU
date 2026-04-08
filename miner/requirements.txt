@@ -1,6 +1,7 @@
 numpy
 requests
-torch
+torch==2.9.0
+torch_xla[tpu]==2.9.0
 psutil
 substrate-interface>=1.7.0
 mnemonic
