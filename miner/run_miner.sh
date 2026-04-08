@@ -76,6 +76,63 @@ is_safe_tpu_host() {
   [[ "$1" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*$ ]]
 }
 
+resolve_tpu_host() {
+  local raw="$1"
+  local host
+  host="$(echo "${raw}" | xargs)"
+  if [[ -z "$host" ]]; then
+    return 1
+  fi
+  if is_safe_tpu_host "$host"; then
+    echo "$host"
+    return 0
+  fi
+  if [[ "$host" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
+    local from_env="${!host:-}"
+    from_env="$(echo "${from_env}" | xargs)"
+    if [[ -n "$from_env" ]] && is_safe_tpu_host "$from_env"; then
+      echo "$from_env"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+sanitize_tpu_process_addresses() {
+  local raw="${TPU_PROCESS_ADDRESSES:-}"
+  if [[ -z "$(echo "${raw}" | xargs)" ]]; then
+    return 0
+  fi
+
+  local entries=()
+  local valid=()
+  IFS=',' read -r -a entries <<< "$raw"
+  for raw_entry in "${entries[@]}"; do
+    local entry
+    entry="$(echo "${raw_entry}" | xargs)"
+    if [[ -z "$entry" ]]; then
+      continue
+    fi
+    if [[ "${entry,,}" == "local" ]]; then
+      echo "⚠️ Ignoring invalid TPU process address entry: ${entry}"
+      continue
+    fi
+    if [[ "$entry" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*:[0-9]{1,5}$ ]]; then
+      valid+=("$entry")
+    else
+      echo "⚠️ Ignoring invalid TPU process address entry: ${entry}"
+    fi
+  done
+
+  if (( ${#valid[@]} == 0 )); then
+    echo "⚠️ No valid TPU process addresses remained after sanitization; unsetting TPU_PROCESS_ADDRESSES"
+    unset TPU_PROCESS_ADDRESSES || true
+    return 0
+  fi
+
+  export TPU_PROCESS_ADDRESSES="$(IFS=, ; echo "${valid[*]}")"
+}
+
 is_tpu_runtime=false
 if is_tpu_environment; then
   is_tpu_runtime=true
@@ -97,12 +154,8 @@ if [[ "$is_tpu_runtime" == true ]]; then
   if [[ -n "$tpu_hosts_raw" ]]; then
     IFS=',' read -r -a tpu_hosts <<< "$tpu_hosts_raw"
     for raw_host in "${tpu_hosts[@]}"; do
-      host="$(echo "${raw_host}" | xargs)"
-      if [[ -z "$host" ]]; then
-        continue
-      fi
-      if ! is_safe_tpu_host "$host"; then
-        echo "⚠️ Skipping unsafe TPU host entry: $host"
+      if ! host="$(resolve_tpu_host "${raw_host}")"; then
+        echo "⚠️ Skipping unsafe TPU host entry: $(echo "${raw_host}" | xargs)"
         continue
       fi
       tpu_hosts_sanitized+=("$host")
@@ -122,6 +175,8 @@ if [[ "$is_tpu_runtime" == true ]]; then
     unset ALICE_TPU_WORKERS || true
     export TPU_WORKER_COUNT=1
   fi
+
+  sanitize_tpu_process_addresses
 
   if [[ "${ALICE_TPU_REMOTE_STARTED:-0}" != "1" && "${ALICE_TPU_DISABLE_REMOTE_START:-0}" != "1" && "${tpu_worker_id}" == "0" ]]; then
     if (( ${#tpu_hosts_sanitized[@]} > 1 )); then
