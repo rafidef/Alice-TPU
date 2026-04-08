@@ -82,6 +82,9 @@ def _parse_tpu_worker_hosts(raw_hosts: Optional[str]) -> List[str]:
 
 
 def _is_valid_tpu_worker_host(value: str) -> bool:
+    # Keep this strict to match libtpu expectations in this project: DNS hostnames
+    # or plain IP literals without port separators. This intentionally rejects
+    # colon-delimited values to avoid accepting host:port and malformed warning text.
     host = str(value or "").strip()
     if not host or ":" in host or "/" in host:
         return False
