@@ -117,8 +117,7 @@ def detect_tpu_runtime() -> Dict[str, Any]:
     )
 
     try:
-        import torch_xla.core.xla_model as xm  # type: ignore
-        _ = xm.xla_device()
+        import torch_xla  # type: ignore # noqa: F401
         xla_error = ""
         available = True
     except Exception as exc:
