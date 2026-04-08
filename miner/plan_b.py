@@ -904,6 +904,7 @@ class LocalTrainer:
             alice_config.num_layers = max(layer_indices) + 1
 
         precision_mode = str(getattr(self.args, "precision", "auto"))
+        # TPU/XLA uses native BF16 efficiently and with better stability than FP16.
         if self.device.type == "xla" and precision_mode != "fp32":
             build_dtype = torch.bfloat16
         elif self.device.type in ("cuda", "mps") and precision_mode != "fp32":

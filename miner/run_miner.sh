@@ -71,6 +71,7 @@ is_tpu_environment() {
   [[ "${PJRT_DEVICE:-}" == "TPU" || -n "${TPU_NAME:-}" || -n "${TPU_WORKER_HOSTNAMES:-}" || -n "${TPU_WORKER_ID:-}" || -n "${TPU_ACCELERATOR_TYPE:-}" || -n "${TPU_TYPE:-}" || -n "${ACCELERATOR_TYPE:-}" ]]
 }
 
+# Restrict to DNS-style hostnames before using host values in SSH commands.
 is_safe_tpu_host() {
   [[ "$1" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*$ ]]
 }
@@ -114,6 +115,9 @@ if [[ "$is_tpu_runtime" == true ]]; then
     export ALICE_TPU_WORKERS="$tpu_hosts_csv"
     export TPU_WORKER_COUNT="${#tpu_hosts_sanitized[@]}"
   else
+    if [[ -n "$tpu_hosts_raw" ]]; then
+      echo "⚠️ No valid TPU hosts remained after sanitization; falling back to single-worker TPU mode"
+    fi
     unset TPU_WORKER_HOSTNAMES || true
     unset ALICE_TPU_WORKERS || true
     export TPU_WORKER_COUNT=1
